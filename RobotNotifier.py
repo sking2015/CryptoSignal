@@ -24,8 +24,8 @@ async def send_message_async(text: str):
     if now - _last_sent_time >= MESSAGE_INTERVAL:
         try:
             await bot.send_message(chat_id=CHAT_ID, text=text)
-            _last_sent_time = now
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 已发送:\n {text}")
+            _last_sent_time = now             
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 已发送:最新数据触发量化信号！ \n {text}")
         except Exception as e:
             print("发送消息出错:", e)
     else:

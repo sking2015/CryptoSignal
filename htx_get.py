@@ -25,7 +25,7 @@ def fetch_signals(symbol="ethusdt", period="30min", size=144, return_df=False):
     }
     resp = requests.get(url, params=params, timeout=10)
     data = resp.json()
-
+    
     if data.get("status") != "ok":
         raise ValueError(f"API返回错误: {data}")
 
@@ -34,22 +34,32 @@ def fetch_signals(symbol="ethusdt", period="30min", size=144, return_df=False):
     df["time"] = pd.to_datetime(df["id"], unit="s") + pd.Timedelta(hours=8)  # 转 UTC+8
     df = df.sort_values("time").reset_index(drop=True)
 
+    print(df)
+
     # === 3. 计算指标 ===
     # MACD
-    macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
-    df["macd"], df["macd_signal"] = macd["MACD_12_26_9"], macd["MACDs_12_26_9"]
+    # print("df",df)
+    macd = ta.macd(df["close"], fast=12, slow=26, signal=9)  
+    if macd is not None:
+        df["macd"], df["macd_signal"] = macd["MACD_12_26_9"], macd["MACDs_12_26_9"]
 
     # RSI
     df["rsi"] = ta.rsi(df["close"], length=14)
 
     # KDJ
-    kdj = ta.stoch(df["high"], df["low"], df["close"], k=9, d=3, smooth_k=3)
-    df["kdj_k"], df["kdj_d"] = kdj["STOCHk_9_3_3"], kdj["STOCHd_9_3_3"]
-    df["kdj_j"] = 3 * df["kdj_k"] - 2 * df["kdj_d"]
+    # print("df",df)
+    
+    if len(df) >= 14:
+        kdj = ta.stoch(df["high"], df["low"], df["close"], k=9, d=3, smooth_k=3)
+        if kdj is not None:
+            df["kdj_k"], df["kdj_d"] = kdj["STOCHk_9_3_3"], kdj["STOCHd_9_3_3"]
+            df["kdj_j"] = 3 * df["kdj_k"] - 2 * df["kdj_d"]
 
     # 布林带
     boll = ta.bbands(df["close"], length=20, std=2)
-    df["boll_upper"], df["boll_middle"], df["boll_lower"] = boll["BBU_20_2.0"], boll["BBM_20_2.0"], boll["BBL_20_2.0"]
+
+    if boll is not None:
+        df["boll_upper"], df["boll_middle"], df["boll_lower"] = boll["BBU_20_2.0"], boll["BBM_20_2.0"], boll["BBL_20_2.0"]
 
     # TD Sequential 计数
     td_count = [0] * len(df)

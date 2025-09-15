@@ -16,8 +16,10 @@ def scanlist(list_hot,timedesc):
         for i in range(1, len(df)):
             prev, curr = df.iloc[i - 1], df.iloc[i]
 
+            # print("curr",curr)
+
             # 买入信号
-            if (curr["rsi"] < 30 and
+            if (curr["rsi"] is not None and curr["rsi"] < 30 and
                 ((prev["macd"] < prev["macd_signal"] and curr["macd"] > curr["macd_signal"]) or
                  (prev["kdj_k"] < prev["kdj_d"] and curr["kdj_k"] > curr["kdj_d"]))):
                 print(f"{curr['time']} 买入信号 | 收盘价={curr['close']:.2f}, RSI={curr['rsi']:.2f}, "
@@ -25,7 +27,7 @@ def scanlist(list_hot,timedesc):
                 bHavesign = True
 
             # 卖出信号
-            if (curr["rsi"] > 70 and
+            if (curr["rsi"] is not None and curr["rsi"] > 70 and
                 ((prev["macd"] > prev["macd_signal"] and curr["macd"] < curr["macd_signal"]) or
                  (prev["kdj_k"] > prev["kdj_d"] and curr["kdj_k"] < curr["kdj_d"]))):
                 print(f"{curr['time']} 卖出信号 | 收盘价={curr['close']:.2f}, RSI={curr['rsi']:.2f}, "
@@ -40,7 +42,7 @@ def scanlist(list_hot,timedesc):
                 print(f"{curr['time']} TD Sequential 九连下跌信号 | 收盘价={curr['close']:.2f}")
                 bHavesign = True
 
-            if i >= 1:
+            if i >= 1 and "boll_lower" in df.columns:                
                 # 布林反弹
                 if df.loc[i-1, "close"] < df.loc[i-1, "boll_lower"] and df.loc[i, "close"] > df.loc[i, "boll_lower"]:
                     print(f"{curr['time']} 布林下轨反弹 | 收盘价={curr['close']:.2f}")
@@ -51,7 +53,7 @@ def scanlist(list_hot,timedesc):
 
 
             # BOLL 趋势保持确认
-            if i >= BOLL_TREND_CONFIRM:
+            if i >= BOLL_TREND_CONFIRM and "boll_lower" in df.columns:
                 if all(df.loc[i - j, "close"] > df.loc[i - j, "boll_upper"] for j in range(BOLL_TREND_CONFIRM)):
                     print(f"{curr['time']} 布林带上轨突破确认（连续{BOLL_TREND_CONFIRM}根） | 收盘价={curr['close']:.2f}")
                     bHavesign = True
@@ -66,29 +68,40 @@ def scanlist(list_hot,timedesc):
         latest = df.iloc[-1]
         latest_prev = df.iloc[-2]
 
-        print(f"\n最新数据: {latest['time']} 收盘价={latest['close']:.2f}, RSI={latest['rsi']:.2f}, "
-              f"KDJ_J={latest['kdj_j']:.2f}, TD_Count={latest['td_count']}")
+        # print("=======================")
+        # print("@@latest\n",latest)
+
+        mess = f"\n最新数据: {latest['time']} 收盘价={latest['close']:.2f}, RSI={latest['rsi']},TD_Count={latest['td_count']}"
+        if "kdj_j" in latest:
+            mess += f" KDJ_J={latest['kdj_j']:.2f}" 
+        # print(f"\n最新数据: {latest['time']} 收盘价={latest['close']:.2f}, RSI={latest['rsi']:.2f}, "
+        #       f"KDJ_J={latest['kdj_j']:.2f}, TD_Count={latest['td_count']}")
+        print(mess)
 
         # RSI 超买/超卖
         latest_rsi_signal = ""
-        if latest["rsi"] > 70:
-            latest_rsi_signal = "RSI 超买"
-        elif latest["rsi"] < 30:
-            latest_rsi_signal = "RSI 超卖"
+        if latest["rsi"] is not None:
+            if latest["rsi"] > 70:
+                latest_rsi_signal = "RSI 超买"
+            elif latest["rsi"] < 30:
+                latest_rsi_signal = "RSI 超卖"
+
 
         # MACD 金叉/死叉
         latest_macd_signal = ""
-        if latest_prev["macd"] < latest_prev["macd_signal"] and latest["macd"] > latest["macd_signal"]:
-            latest_macd_signal = "MACD 金叉"
-        elif latest_prev["macd"] > latest_prev["macd_signal"] and latest["macd"] < latest["macd_signal"]:
-            latest_macd_signal = "MACD 死叉"
+        if "macd" in latest:            
+            if latest_prev["macd"] < latest_prev["macd_signal"] and latest["macd"] > latest["macd_signal"]:
+                latest_macd_signal = "MACD 金叉"
+            elif latest_prev["macd"] > latest_prev["macd_signal"] and latest["macd"] < latest["macd_signal"]:
+                latest_macd_signal = "MACD 死叉"
 
         # KDJ 金叉/死叉
         latest_kdj_signal = ""
-        if latest_prev["kdj_k"] < latest_prev["kdj_d"] and latest["kdj_k"] > latest["kdj_d"]:
-            latest_kdj_signal = "KDJ 金叉"
-        elif latest_prev["kdj_k"] > latest_prev["kdj_d"] and latest["kdj_k"] < latest["kdj_d"]:
-            latest_kdj_signal = "KDJ 死叉"
+        if "kdj_k" in latest: 
+            if latest_prev["kdj_k"] < latest_prev["kdj_d"] and latest["kdj_k"] > latest["kdj_d"]:
+                latest_kdj_signal = "KDJ 金叉"
+            elif latest_prev["kdj_k"] > latest_prev["kdj_d"] and latest["kdj_k"] < latest["kdj_d"]:
+                latest_kdj_signal = "KDJ 死叉"
 
         # TD Sequential
         latest_td_signal = ""
@@ -99,19 +112,23 @@ def scanlist(list_hot,timedesc):
 
         # BOLL 趋势保持确认
         latest_boll_signal = ""
-        if all(df.loc[len(df) - 1 - j, "close"] > df.loc[len(df) - 1 - j, "boll_upper"] for j in range(BOLL_TREND_CONFIRM)):
-            latest_boll_signal = f"布林带上轨突破确认（连续{BOLL_TREND_CONFIRM}根）"
-        if all(df.loc[len(df) - 1 - j, "close"] < df.loc[len(df) - 1 - j, "boll_lower"] for j in range(BOLL_TREND_CONFIRM)):
-            latest_boll_signal = f"布林带下轨突破确认（连续{BOLL_TREND_CONFIRM}根）"
-
         # BOLL 反弹信号
         latest_boll_rebound_signal = ""
-        if len(df) >= 2:  # 保证有前一根K线
-            latest_prev = df.iloc[-2]
-            if latest_prev["close"] < latest_prev["boll_lower"] and latest["close"] > latest["boll_lower"]:
-                latest_boll_rebound_signal = "布林下轨反弹"
-            elif latest_prev["close"] > latest_prev["boll_upper"] and latest["close"] < latest["boll_upper"]:
-                latest_boll_rebound_signal = "布林上轨反弹"            
+
+        if "boll_upper" in latest: 
+            if all(df.loc[len(df) - 1 - j, "close"] > df.loc[len(df) - 1 - j, "boll_upper"] for j in range(BOLL_TREND_CONFIRM)):
+                latest_boll_signal = f"布林带上轨突破确认（连续{BOLL_TREND_CONFIRM}根）"
+            if all(df.loc[len(df) - 1 - j, "close"] < df.loc[len(df) - 1 - j, "boll_lower"] for j in range(BOLL_TREND_CONFIRM)):
+                latest_boll_signal = f"布林带下轨突破确认（连续{BOLL_TREND_CONFIRM}根）"
+
+        
+        
+            if len(df) >= 2:  # 保证有前一根K线
+                latest_prev = df.iloc[-2]
+                if latest_prev["close"] < latest_prev["boll_lower"] and latest["close"] > latest["boll_lower"]:
+                    latest_boll_rebound_signal = "布林下轨反弹"
+                elif latest_prev["close"] > latest_prev["boll_upper"] and latest["close"] < latest["boll_upper"]:
+                    latest_boll_rebound_signal = "布林上轨反弹"            
 
         # 判断最新数据是否触发买卖信号
         if (latest_rsi_signal and latest_kdj_signal) or latest_macd_signal or latest_td_signal or latest_boll_signal or latest_boll_rebound_signal:

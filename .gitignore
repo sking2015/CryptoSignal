@@ -56,3 +56,6 @@ coverage.xml
 # OS specific
 .DS_Store
 Thumbs.db
+
+#数据文件
+*.db

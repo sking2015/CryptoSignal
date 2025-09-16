@@ -1,7 +1,11 @@
 import sqlite3
 import requests
+import asyncio
+import time
+from datetime import datetime
 import pandas as pd
 from DatabaseUpdate import DB_FILE,HOT_SYMBOLS,update_all_symbol
+from RobotNotifier import send_message_async
 
 def get_current_price(symbol):
     """
@@ -12,7 +16,7 @@ def get_current_price(symbol):
     return float(resp["tick"]["data"][0]["price"])
 
 # 计算布林带并检测突破
-def check_bollinger_breakout(conn, table: str, price,period: int = 20, num_std: float = 2.0):
+def check_bollinger_breakout(conn, table: str, price,limit: int = 20, num_std: float = 2.0):
     """
     从指定K线表取数据，计算布林带，检查最新价格是否触及上/下轨
     :param conn: sqlite3.Connection
@@ -21,16 +25,17 @@ def check_bollinger_breakout(conn, table: str, price,period: int = 20, num_std: 
     :param num_std: 标准差倍数 (默认2)
     """
     # 取最近 period+2 根数据，保证够算
-    query = f"SELECT ts, close, high, low FROM {table} ORDER BY ts DESC LIMIT {period+2}"
+    query = f"SELECT ts, close, high, low FROM {table} ORDER BY ts DESC LIMIT {limit+2}"
     df = pd.read_sql(query, conn).sort_values("ts")
 
-    if len(df) < period:
-        print(f"⚠️ {table} 数据不足 {period} 根，无法计算布林带")
+
+    if len(df) < limit:
+        print(f"⚠️ {table} 数据不足 {limit} 根，无法计算布林带")
         return
 
     # 计算布林带
-    df["ma"] = df["close"].rolling(period).mean()
-    df["std"] = df["close"].rolling(period).std()
+    df["ma"] = df["close"].rolling(limit).mean()
+    df["std"] = df["close"].rolling(limit).std()
     df["upper"] = df["ma"] + num_std * df["std"]
     df["lower"] = df["ma"] - num_std * df["std"]
 
@@ -38,18 +43,27 @@ def check_bollinger_breakout(conn, table: str, price,period: int = 20, num_std: 
     # price = latest["close"]
     khprice = latest["high"]
     klprice = latest["low"]
+
+
+    cond = False
     
     # print("当前布林带数据",df)
     # print("当前价格",price)
     if price >= latest["upper"]:
         print(f"📈 {table} 最新价 {price} 触及布林上轨 {latest['upper']:.2f}")
+        cond = True
     elif price <= latest["lower"]:
         print(f"📉 {table} 最新价 {price} 触及布林下轨 {latest['lower']:.2f}")
+        cond = True
 
     if khprice >= latest["upper"]:
         print(f"📈 {table} k线最高价 {khprice} 触及布林上轨 {latest['upper']:.2f}")
+        cond = True
     elif klprice <= latest["lower"]:
         print(f"📉 {table} k线最低价 {klprice} 触及布林下轨 {latest['lower']:.2f}")        
+        cond = True
+
+    return cond
 
 
 def check_all_tables(db_path: str,symbol):
@@ -67,13 +81,63 @@ def check_all_tables(db_path: str,symbol):
 
     curPrice = get_current_price(symbol)
 
+    nTriggerCount = 0
+    b1DayTrgger = False
+
     for table in tables:
-        check_bollinger_breakout(conn, table,curPrice)
+        print(f"检查{table}的k线数据")
+        
+        para = table.split("_")
+        period = para[1]
+        print(f"检查{symbol}的{period}线")      
+        
+        if check_bollinger_breakout(conn, table,curPrice):
+            nTriggerCount += 1   
+            if period == "1day":
+                b1DayTrgger = True
+                print("===========================================")
+                print(f"{symbol} 触及日线级别布林带上下轨")
+
+    # 如果日线触及布林带上下轨或有五条线均触及布林带上下轨,则通知
+    if b1DayTrgger and nTriggerCount > 2 or  nTriggerCount > 5:
+        return True                        
 
     conn.close()
 
-
-if __name__ == "__main__":
+async def TimerTask():
     update_all_symbol()
     for symbol in HOT_SYMBOLS:
-        check_all_tables(DB_FILE,symbol)  # 这里换成你的数据库文件名
+        sMess = ""
+        if check_all_tables(DB_FILE,symbol):  # 这里换成你的数据库文件名            
+            sMess += " "
+            sMess += symbol
+
+    if sMess != "":
+        print("===========================================")  
+        message = "📉以下币种触发量化信号，请关注：" + sMess    
+        print(message)
+        await send_message_async(message)   
+
+def main():
+    """
+    每当分钟数能被5整除时执行一次 task()
+    """
+    last_minute = -1
+    print("开始进入定时任务，每五分钟检查一次")
+    while True:
+        now = datetime.now()
+        minute = now.minute
+        if minute % 5 == 0 and minute != last_minute:
+            print(f"⏰ 触发任务: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+            asyncio.run(TimerTask())
+            last_minute = minute
+        time.sleep(10) 
+ 
+
+
+if __name__ == "__main__":
+    # asyncio.run(main())
+    main()
+    
+
+

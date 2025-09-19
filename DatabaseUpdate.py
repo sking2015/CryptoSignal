@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 
 DB_FILE = "kline.db"
+SYMBOLS_TALBE = "all_symbol"
 
 
 def ts_to_str(ts: int, tz_offset: int = 8) -> str:
@@ -17,10 +18,10 @@ def ts_to_str(ts: int, tz_offset: int = 8) -> str:
 
 
 def init_table(conn,table):
-    conn = sqlite3.connect(DB_FILE)
+    # conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute(f"""
-    CREATE TABLE IF NOT EXISTS {table} (
+    CREATE TABLE IF NOT EXISTS "{table}" (
         ts INTEGER PRIMARY KEY,   -- 时间戳(秒)
         open REAL,
         high REAL,
@@ -37,19 +38,23 @@ def init_table(conn,table):
 def fetch_kline(symbol, period, size):
     url = "https://api.huobi.pro/market/history/kline"
     params = {"symbol": symbol, "period": period, "size": size}
+    print("拉取",url)
     resp = requests.get(url, params=params).json()
     data = resp.get("data", [])
+    # print("拉取结果",data)
+
     df = pd.DataFrame(data)
     if df.empty:
         return df
     df = df.sort_values("id")  # id 是时间戳（秒）
     df = df.rename(columns={"id": "ts"})
+    df = df.drop_duplicates(subset=["ts"])
     return df[["ts", "open", "high", "low", "close", "amount", "vol", "count"]]
 
 
 def get_latest_ts(conn,table):
     cursor = conn.cursor()
-    cursor.execute(f"SELECT MAX(ts) FROM {table}")
+    cursor.execute(f'SELECT MAX(ts) FROM "{table}"')
     result = cursor.fetchone()
     return result[0] if result and result[0] else None
 
@@ -82,7 +87,7 @@ def update_kline(conn,symbol,period):
         # 数据库为空，拉100根
         print(f"📥{table} 表为空，拉取100根")
         df = fetch_kline(symbol, period, 100)
-        if not df.empty:
+        if not df.empty:             
             df.to_sql(table, conn, if_exists="append", index=False)
     else:
         # 计算缺多少根
@@ -136,7 +141,39 @@ def update_all_symbol():
 
     conn.close()
 
+def get_all_symbols_from_net(conn):
+    url = "https://api.huobi.pro/v1/common/symbols"
+    resp = requests.get(url)
+    data = resp.json()
+    if data["status"] == "ok":
+        symbols = [item["symbol"] for item in data["data"]]
+        symbolsdata = data["data"]
+        # print("拉取结果",symbolsdata)
 
+        df = pd.DataFrame(symbolsdata) 
+        df = df[["symbol", "symbol-partition", "state", "api-trading"]]
+        print("所有数据",df)
+        
+        if not df.empty:                        
+            df.to_sql(SYMBOLS_TALBE, conn, if_exists="replace", index=True)    
+            print(f"已向数据库写入{len(df)}条数据")
+
+        return symbols
+    else:
+        raise Exception(f"API error: {data}")
+    
+def get_all_symbols_from_database(conn):
+    query = f"SELECT symbol, state {SYMBOLS_TALBE} ORDER BY ts DESC LIMIT {limit+2}"
+    df = pd.read_sql(query, conn).sort_values("ts")
 
 if __name__ == "__main__":
-    update_all_symbol()    
+    conn = sqlite3.connect(DB_FILE) 
+    symbols = get_all_symbols_from_net(conn)
+
+    conn.close()
+
+    print(f"交易对总数: {len(symbols)}")
+    print("前10个交易对:", symbols[:10])
+    # update_all_symbol()    
+
+

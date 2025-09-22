@@ -9,6 +9,8 @@ from Common import InitEnvironment
 from ConstDef import g_ACD
 from CheckbyBoll import check_bollinger_convergence,check_bollinger_convergence_debug
 from updateAllKLine import update_all_kline
+import sys
+import signal
 
 def check_data4OneTable(conn, table: str):
     df = pd.read_sql(f'SELECT * FROM "{table}" ORDER BY open_time', conn)
@@ -91,16 +93,30 @@ async def TimerTask(conn):
         await send_message_async(message)   
 
 
-    print(f"共检查{onlineNum}对交易对")    
+    print(f"共检查{onlineNum}对交易对")   
+
+
+
+
+def handler(sig, frame):
+    print("\n检测到 Ctrl+C，程序已安全退出。")    
+    sys.exit(0)
+
+
+
 
 def main():
     print("开始进入定时任务，执行完后休息一秒执行下一次")
+    # 绑定 SIGINT 信号（Ctrl+C）
+    signal.signal(signal.SIGINT, handler)  
+
+
     conn = sqlite3.connect(g_ACD.getDB())   
-    asyncio.run(TimerTask(conn))
-    conn.close()
-    # while True:
-    #     asyncio.run(TimerTask(conn))            
-    #     time.sleep(1) 
+    # asyncio.run(TimerTask(conn))
+
+    while True:
+        asyncio.run(TimerTask(conn))            
+        time.sleep(1) 
     
  
 def Test():

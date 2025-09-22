@@ -1,5 +1,5 @@
 import sqlite3
-from ConstDef import ALL_CONST
+from ConstDef import g_ACD
 
 def maintain_db(db_path):
     conn = sqlite3.connect(db_path)
@@ -23,4 +23,5 @@ def maintain_db(db_path):
     conn.close()
 
 # 使用
-maintain_db(ALL_CONST["DB"])
+g_ACD.setExchange("BINANCE")
+maintain_db(g_ACD.getDB())

@@ -2,9 +2,7 @@ import sqlite3
 import requests
 import pandas as pd
 from datetime import datetime, timezone, timedelta
-
-DB_FILE = "kline.db"
-SYMBOLS_TALBE = "all_symbol"
+from ConstDef import g_ACD
 
 
 def ts_to_str(ts: int, tz_offset: int = 8) -> str:
@@ -12,6 +10,8 @@ def ts_to_str(ts: int, tz_offset: int = 8) -> str:
     将Unix时间戳(秒)转为可读日期字符串
     默认转换为北京时间 (UTC+8)
     """
+
+    print("ts",ts,"tz_offset",tz_offset)
     tz = timezone(timedelta(hours=tz_offset))
     dt = datetime.fromtimestamp(ts, tz)
     return dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -19,44 +19,103 @@ def ts_to_str(ts: int, tz_offset: int = 8) -> str:
 
 def init_table(conn,table):
     # conn = sqlite3.connect(DB_FILE)
+    # print("尝试建表",table)
     cursor = conn.cursor()
-    cursor.execute(f"""
-    CREATE TABLE IF NOT EXISTS "{table}" (
-        ts INTEGER PRIMARY KEY,   -- 时间戳(秒)
-        open REAL,
-        high REAL,
-        low REAL,
-        close REAL,
-        amount REAL,
-        vol REAL,
-        count INTEGER
-    )
-    """)
-    conn.commit()    
+    if g_ACD.getExchange() == "HTX":
+        cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS "{table}" (
+            ts INTEGER PRIMARY KEY,   -- 时间戳(秒)
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            amount REAL,
+            vol REAL,
+            count INTEGER
+        )
+        """)
+    else:
+        cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS "{table}" (
+            open_time INTEGER PRIMARY KEY,   -- 时间戳(秒)
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            close_time INTEGER,
+            quote_asset_volume REAL,
+            num_trades INTEGER,
+            taker_base_vol REAL,
+            taker_quote_vol REAL
+        )
+        """)        
+    conn.commit()       
 
 
-def fetch_kline(symbol, period, size):
-    url = "https://api.huobi.pro/market/history/kline"
+def fetch_kline_by_HTX(symbol, period, size):
+    url = g_ACD.getApiKline()
     params = {"symbol": symbol, "period": period, "size": size}
-    print("拉取",url)
-    resp = requests.get(url, params=params).json()
+
+    resp = requests.get(url, params=params).json()    
+    print("拉取结果",resp)
     data = resp.get("data", [])
-    # print("拉取结果",data)
+    
 
     df = pd.DataFrame(data)
     if df.empty:
-        return df
+        return df      
+
+
     df = df.sort_values("id")  # id 是时间戳（秒）
     df = df.rename(columns={"id": "ts"})
     df = df.drop_duplicates(subset=["ts"])
     return df[["ts", "open", "high", "low", "close", "amount", "vol", "count"]]
 
+def fetch_kline_by_binance(symbol, period, size):
+    url = g_ACD.getApiKline()
+    params = {"symbol": symbol, "interval": period, "limit": size}
+    print("拉取",url)
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"{symbol} 请求失败: {e}")
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(data, columns=[
+        "open_time","open","high","low","close","volume",
+        "close_time","quote_asset_volume","num_trades",
+        "taker_base_vol","taker_quote_vol","ignore"
+    ])  
+    df = df.drop(columns=["ignore"])
+    df = df.drop_duplicates(subset=["open_time"])  
+    return df
+
+def fetch_kline(symbol, period, size):
+    
+
+    if g_ACD.getExchange() == "HTX":
+        return fetch_kline_by_HTX(symbol, period, size)
+    else:
+        return fetch_kline_by_binance(symbol, period, size)
+
 
 def get_latest_ts(conn,table):
     cursor = conn.cursor()
-    cursor.execute(f'SELECT MAX(ts) FROM "{table}"')
+    indexname = g_ACD.getIndexName()
+    cursor.execute(f'SELECT MAX({indexname}) FROM "{table}"')
     result = cursor.fetchone()
-    return result[0] if result and result[0] else None
+    lastts = None    
+    if result and result[0]:
+        if g_ACD.getExchange() == "BINANCE":        
+            lastts = result[0]/1000
+            print("看一下返回的lastts",lastts)
+        else:
+            lastts = result[0]
+
+    return lastts
 
 
 def update_kline(conn,symbol,period):
@@ -64,7 +123,9 @@ def update_kline(conn,symbol,period):
 
     print("处理表:",table)
 
-    interval = PERIOD_INTERVAL[period]
+    dictInterval = g_ACD.getInterval()
+
+    interval = dictInterval[period]
     
     last_ts = get_latest_ts(conn,table)
 
@@ -78,7 +139,11 @@ def update_kline(conn,symbol,period):
     if latest_df.empty:
         print("❌ API返回空数据")
         return
-    latest_ts = int(latest_df.iloc[-1]["ts"])
+    
+    indexname = g_ACD.getIndexName()
+    latest_ts = int(latest_df.iloc[-1][indexname])
+    if g_ACD.getExchange() == "BINANCE":
+        latest_ts /= 1000        
 
 
     print("云端数据最后一条时间:" + ts_to_str(latest_ts))
@@ -95,11 +160,12 @@ def update_kline(conn,symbol,period):
         if missing <= 0:
             print(f"{table}✅ 已是最新，无需更新")
         else:
-            need = min(missing, 100)
+            need = int(min(missing, 100))
             print(f"{table}📥 缺少 {missing} 根，拉取 {need} 根")
             df = fetch_kline(symbol, period, need)
             # 过滤掉数据库里已有的数据
-            df = df[df["ts"] > last_ts]
+            print("当前df",df)
+            df = df[df[indexname] > last_ts]
             if not df.empty:
                 df.to_sql(table, conn, if_exists="append", index=False)
     
@@ -119,8 +185,10 @@ PERIOD_INTERVAL = {
 }
 
 def update_all_kline(symbol,conn):
+
+    dictInterval = g_ACD.getInterval()
        
-    for period in PERIOD_INTERVAL.keys():
+    for period in dictInterval.keys():
         tabel = f"{symbol}_{period}"
         init_table(conn,tabel)
         update_kline(conn,symbol,period)
@@ -135,7 +203,7 @@ HOT_SYMBOLS = [
 ]
 
 def update_all_symbol():
-    conn = sqlite3.connect(DB_FILE) 
+    conn = sqlite3.connect(g_ACD.getDB()) 
     for symbol in HOT_SYMBOLS:
         update_all_kline(symbol,conn)
 
@@ -167,7 +235,8 @@ def get_all_symbols_from_database(conn):
     df = pd.read_sql(query, conn).sort_values("ts")
 
 if __name__ == "__main__":
-    conn = sqlite3.connect(DB_FILE) 
+
+    conn = sqlite3.connect(g_ACD.getDB()) 
     symbols = get_all_symbols_from_net(conn)
 
     conn.close()

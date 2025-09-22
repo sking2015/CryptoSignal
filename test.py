@@ -3,7 +3,7 @@ from ConstDef import ALL_CONST
 
 def get_latest_ts(conn,table):
     cursor = conn.cursor()
-    cursor.execute(f'SELECT MAX(ts) FROM "{table}"')
+    cursor.execute(f"SELECT MAX(ts) FROM {[table]}")
     result = cursor.fetchone()
     return result[0] if result and result[0] else None
 

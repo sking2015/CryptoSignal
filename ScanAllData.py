@@ -5,12 +5,15 @@ import time
 from datetime import datetime
 import pandas as pd
 from RobotNotifier import send_message_async
-from Common import InitEnvironment
+from Common import InitEnvironment,save_simple,load_number_default
 from ConstDef import g_ACD
 from CheckbyBoll import check_bollinger_convergence,check_bollinger_convergence_debug
 from updateAllKLine import update_all_kline
+
 import sys
 import signal
+
+
 
 def check_data4OneTable(conn, table: str):
     df = pd.read_sql(f'SELECT * FROM "{table}" ORDER BY open_time', conn)
@@ -19,7 +22,7 @@ def check_data4OneTable(conn, table: str):
     return check_bollinger_convergence(df)      
 
 
-def check_all_tables(conn,symbol):
+async def check_all_tables(conn,symbol):
     """
     遍历数据库里所有kline表，检查布林突破
     """
@@ -50,7 +53,7 @@ def check_all_tables(conn,symbol):
 
     if count > 0:
         strMess = f"{symbol} 在以下时间线上收敛:[{mess}]"
-        send_message_async(strMess)
+        await send_message_async(strMess)
     return count,mess
 
                                   
@@ -58,30 +61,41 @@ def check_all_tables(conn,symbol):
 
 async def TimerTask(conn):
 
+ 
+
     conn.row_factory = sqlite3.Row
     cursorSymbols = conn.cursor()
+
+    lastindex = load_number_default("lastIndex.txt",0)
 
 
     onlineNum = 0
 
-    cursorSymbols.execute(f"SELECT symbol FROM {g_ACD.getTableSymbols()}")
-    symbols = [row[0] for row in cursorSymbols.fetchall()]         
-    for symbol in symbols:                           
-        print(f"准备检查交易对{symbol}")        
-        onlineNum += 1    
+    cursorSymbols.execute(f'SELECT "index",symbol FROM {g_ACD.getTableSymbols()} WHERE "index">= {lastindex}')
+    symbols = [row[:2] for row in cursorSymbols.fetchall()]         
+    # for symbol in symbols:                           
+    #     print(f"准备检查交易对{symbol}")        
+    #     onlineNum += 1  
+    #     save_simple(symbol[0],"lastIndex.txt")
+    #     time.sleep(0.1)
 
 
     sMess = ""    
-    for symbol in symbols:    
+    for row in symbols:   
+        lastindex = row[0]
+        symbol = row[1]
+        print(symbol)
+        time.sleep(0.1) 
 
 
-        if symbol == "USDCUSDT":
+        if symbol == "USDCUSDT" or symbol == "USD1USDT":
             # 稳定币交易对忽略
             continue 
 
         update_all_kline(symbol,conn)
-        count,submess = check_all_tables(conn,symbol)
-        if count > 0:  # 这里换成你的数据库文件名            
+        count,submess = await check_all_tables(conn,symbol)
+        save_simple(lastindex,"lastIndex.txt")
+        if count > 0:           
             sMess += " "
             sMess += f"{symbol}:{count}:[{submess}]"
             sMess += "\r\n"
@@ -92,6 +106,8 @@ async def TimerTask(conn):
         # print(message)
         await send_message_async(message)   
 
+    # 全部执行完了要从新开始
+    save_simple(0,"lastIndex.txt")
 
     print(f"共检查{onlineNum}对交易对")   
 
@@ -130,3 +146,7 @@ if __name__ == "__main__":
     InitEnvironment()
     main()
         
+
+
+
+      

@@ -7,7 +7,7 @@ import pandas as pd
 from RobotNotifier import send_message_async
 from Common import InitEnvironment,save_simple,load_number_default
 from ConstDef import g_ACD
-from CheckbyBoll import check_bollinger_convergence,check_bollinger_convergence_debug
+from CheckbyBoll import check_bollinger_convergence,check_bollinger_breakout_by_kline
 from updateAllKLine import update_all_kline
 
 import sys
@@ -38,6 +38,12 @@ async def check_all_tables(conn,symbol):
     # 在多少时间段上处于收敛
     count = 0
     mess = ""
+
+    count_break = 0
+    mess_break = ""
+
+    indexname = g_ACD.getIndexName()
+
     for table in tables:
         print(f"检查{table}的k线数据")
         
@@ -50,10 +56,25 @@ async def check_all_tables(conn,symbol):
             mess += period
             mess += " "
 
+        if check_bollinger_breakout_by_kline(conn,table,indexname):
+            count_break += 1
+            print(f"{symbol}在{period}线级别触及布林带上下轨")
+            mess_break += period
+            mess_break += " "
+
+
+
+        
+
 
     if count > 0:
         strMess = f"{symbol} 在以下时间线上收敛:[{mess}]"
         await send_message_async(strMess)
+
+    if count_break > 0:
+        strMess = f"{symbol} 在以下时间线上触边:[{mess_break}]"
+        await send_message_async(strMess)
+                
     return count,mess
 
                                   

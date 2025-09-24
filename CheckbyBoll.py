@@ -172,6 +172,47 @@ def check_bollinger_convergence(df: pd.DataFrame, n: int = 10, period: int = 20,
 
 
 # 计算布林带并检测突破
+def check_bollinger_breakout_by_kline(conn, table,indexname: str,limit: int = 20, num_std: float = 2.0):
+    """
+    从指定K线表取数据，计算布林带，检查最新价格是否触及上/下轨
+    :param conn: sqlite3.Connection
+    :param table: 表名 (例如 'kline_30min')
+    :param period: 布林周期 (默认20)
+    :param num_std: 标准差倍数 (默认2)
+    """
+    # 取最近 period+2 根数据，保证够算
+    query = f'SELECT {indexname}, close, high, low FROM "{table}" ORDER BY {indexname} DESC LIMIT {limit+2}'
+    df = pd.read_sql(query, conn).sort_values(indexname)
+
+
+    if len(df) < limit:
+        print(f"⚠️ {table} 数据不足 {limit} 根，无法计算布林带")
+        return
+
+    # 计算布林带
+    df["ma"] = df["close"].rolling(limit).mean()
+    df["std"] = df["close"].rolling(limit).std()
+    df["upper"] = df["ma"] + num_std * df["std"]
+    df["lower"] = df["ma"] - num_std * df["std"]
+
+    latest = df.iloc[-1]
+    # price = latest["close"]
+    khprice = latest["high"]
+    klprice = latest["low"]
+
+    cond = False
+    
+    # print("当前布林带数据",df)
+    if khprice >= latest["upper"]:
+        print(f"📈 {table} k线最高价 {khprice} 触及布林上轨 {latest['upper']:.2f}")
+        cond = True
+    elif klprice <= latest["lower"]:
+        print(f"📉 {table} k线最低价 {klprice} 触及布林下轨 {latest['lower']:.2f}")        
+        cond = True
+
+    return cond
+
+# 计算布林带并检测突破
 def check_bollinger_breakout(conn, table: str, price,limit: int = 20, num_std: float = 2.0):
     """
     从指定K线表取数据，计算布林带，检查最新价格是否触及上/下轨

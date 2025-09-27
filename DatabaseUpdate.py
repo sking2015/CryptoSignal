@@ -165,7 +165,7 @@ def update_kline(conn,symbol,period):
             df = fetch_kline(symbol, period, need)
             # 过滤掉数据库里已有的数据
             print("当前df",df)
-            if df is None:
+            if df is None or len(df) == 0:
                 print(f"未能取得{table}数据,跳过~!")
                 return
             

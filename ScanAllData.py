@@ -39,8 +39,11 @@ async def check_all_tables(conn,symbol):
     count = 0
     mess = ""
 
-    count_break = 0
-    mess_break = ""
+    count_break_up = 0
+    count_break_down = 0
+
+    mess_break_up = ""
+    mess_break_down = ""
 
     indexname = g_ACD.getIndexName()
 
@@ -56,24 +59,30 @@ async def check_all_tables(conn,symbol):
             mess += period
             mess += " "
 
-        if check_bollinger_breakout_by_kline(conn,table,indexname):
-            count_break += 1
-            print(f"{symbol}在{period}线级别触及布林带上下轨")
-            mess_break += period
-            mess_break += " "
-
-
-
-        
+        bbr = check_bollinger_breakout_by_kline(conn,table,indexname)
+        if bbr == 1:
+            count_break_up += 1
+            print(f"{symbol}在{period}线级别布林带触顶📈")
+            mess_break_up += period
+            mess_break_up += " "
+        elif bbr == 2:
+            count_break_down += 1
+            print(f"{symbol}在{period}线级别布林带触底📉")
+            mess_break_down += period
+            mess_break_down += " "            
 
 
     if count > 0:
         strMess = f"{symbol} 在以下时间线上收敛:[{mess}]"
         await send_message_async(strMess)
 
-    if count_break > 0:
-        strMess = f"{symbol} 在以下时间线上触边:[{mess_break}]"
+    if count_break_up > 0:
+        strMess = f"{symbol} 在以下时间线上触顶📈:[{mess_break_up}]"
         await send_message_async(strMess)
+
+    if count_break_down > 0:
+        strMess = f"{symbol} 在以下时间线上触底📉:[{mess_break_down}]"
+        await send_message_async(strMess)        
                 
     return count,mess
 

@@ -4,8 +4,10 @@ import time
 from telegram import Bot
 
 # ===================== 配置 =====================
-TOKEN = "8414564044:AAHTT2sl9fzrMu6jG2dyax1IHdwsjrGLtlM"
-CHAT_ID = "8052437792"  # 可以是你的个人ID或者群组ID
+# TOKEN = "8414564044:AAHTT2sl9fzrMu6jG2dyax1IHdwsjrGLtlM"
+TOKEN = "8245368359:AAGv1GSxYTwo9BeQ0G0DC7ytvDZQgiEVVzE"
+# CHAT_ID = "8052437792"  # 可以是你的个人ID或者群组ID
+CHAT_ID = "7808024731"
 MESSAGE_INTERVAL = 60  # 秒，检查条件的间隔
 # ===================== 模块内部状态 =====================
 _bot_instance = None

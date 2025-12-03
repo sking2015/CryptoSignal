@@ -75,7 +75,7 @@ def fetch_kline_by_HTX(symbol, period, size):
 def fetch_kline_by_binance(symbol, period, size):
     url = g_ACD.getApiKline()
     params = {"symbol": symbol, "interval": period, "limit": size}
-    print("拉取",url)
+    # print("拉取",url)
     try:
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
@@ -150,8 +150,8 @@ def update_kline(conn,symbol,period):
 
     if last_ts is None:
         # 数据库为空，拉100根
-        print(f"📥{table} 表为空，拉取100根")
-        df = fetch_kline(symbol, period, 100)
+        print(f"📥{table} 表为空，拉取300根")
+        df = fetch_kline(symbol, period, 300)
         if not df.empty:             
             df.to_sql(table, conn, if_exists="append", index=False)
     else:
@@ -160,7 +160,7 @@ def update_kline(conn,symbol,period):
         if missing <= 0:
             print(f"{table}✅ 已是最新，无需更新")
         else:
-            need = int(min(missing, 100))
+            need = int(min(missing, 300))
             print(f"{table}📥 缺少 {missing} 根，拉取 {need} 根")
             df = fetch_kline(symbol, period, need)
             # 过滤掉数据库里已有的数据

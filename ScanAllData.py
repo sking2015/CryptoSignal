@@ -142,10 +142,11 @@ async def TimerTask(conn):
     print(f"共检查{onlineNum}对交易对")   
 
 
-
+g_conn = None
 
 def handler(sig, frame):
-    print("\n检测到 Ctrl+C，程序已安全退出。")    
+    print("\n检测到 Ctrl+C，程序已安全退出。")        
+    g_conn.close()
     sys.exit(0)
 
 
@@ -157,11 +158,11 @@ def main():
     signal.signal(signal.SIGINT, handler)  
 
 
-    conn = sqlite3.connect(g_ACD.getDB())   
+    g_conn = sqlite3.connect(g_ACD.getDB())   
     # asyncio.run(TimerTask(conn))
 
     while True:
-        asyncio.run(TimerTask(conn))            
+        asyncio.run(TimerTask(g_conn))            
         time.sleep(1) 
     
  

@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>缠论可视化 - Web版</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; background-color: #1e1e1e; color: #ccc; }
+        .controls {
+            padding: 10px 20px;
+            background-color: #2d2d2d;
+            border-bottom: 1px solid #444;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        select, button {
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid #555;
+            background-color: #333;
+            color: white;
+            cursor: pointer;
+        }
+        button:hover { background-color: #444; }
+        #chart-container {
+            width: 100%;
+            height: 90vh; /* 占据大部分屏幕 */
+        }
+        .loading {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 20px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <label>代币:</label>
+        <select id="symbol">
+            <option value="BTC">BTC</option>
+            <option value="ETH">ETH</option>
+            <option value="SOL">SOL</option>
+            <option value="XRP">XRP</option>
+            <option value="DOGE">DOGE</option>
+            <option value="BNB">BNB</option>
+        </select>
+
+        <label>周期:</label>
+        <select id="interval">
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m" selected>30m</option>
+            <option value="1h">1h</option>
+            <option value="2h">2h</option>
+            <option value="4h">4h</option>
+            <option value="8h">8h</option>
+            <option value="1d">1d</option>
+            <option value="3d">3d</option>
+            <option value="1w">1week</option>
+        </select>
+
+        <button onclick="fetchData()">加载图表</button>
+        <span id="status" style="margin-left:auto; font-size: 12px; color: #888;"></span>
+    </div>
+
+    <div id="chart-container"></div>
+    <div id="loading" class="loading">Loading...</div>
+
+    <script>
+        // 初始化 ECharts 实例
+        var myChart = echarts.init(document.getElementById('chart-container'));
+        var option;
+
+        // 监听窗口大小变化
+        window.addEventListener('resize', function() {
+            myChart.resize();
+        });
+
+        // 初始加载
+        fetchData();
+
+        function fetchData() {
+            const symbol = document.getElementById('symbol').value;
+            const interval = document.getElementById('interval').value;
+            const statusSpan = document.getElementById('status');
+            const loading = document.getElementById('loading');
+
+            loading.style.display = 'block';
+            statusSpan.innerText = '正在请求数据...';
+
+            // 请求 Python 后端
+            fetch(`http://localhost:5000/api/data?symbol=${symbol}&interval=${interval}`)
+                .then(response => response.json())
+                .then(res => {
+                    loading.style.display = 'none';
+                    if (res.status === 'success') {
+                        statusSpan.innerText = `成功: ${symbol} ${interval}, 数据量: ${res.data.dates.length}`;
+                        renderChart(res.data, symbol, interval);
+                    } else {
+                        statusSpan.innerText = '错误: 未找到数据';
+                        alert('未找到数据，请确保后端数据库有该品种数据');
+                    }
+                })
+                .catch(err => {
+                    loading.style.display = 'none';
+                    statusSpan.innerText = '连接错误';
+                    console.error(err);
+                    alert('连接服务器失败，请确保 server.py 正在运行');
+                });
+        }
+
+        function renderChart(data, symbol, interval) {
+            const dates = data.dates;
+            
+            // 构造中枢的矩形区域 (markArea)
+            const centerAreas = data.centers.map(c => {
+                return [
+                    {
+                        xAxis: c[0], 
+                        yAxis: c[2], // ZG
+                        itemStyle: { color: 'rgba(255, 255, 0, 0.2)', borderWidth: 1, borderColor: 'yellow', borderType: 'dashed' }
+                    },
+                    {
+                        xAxis: c[1], 
+                        yAxis: c[3]  // ZD
+                    }
+                ];
+            });
+
+            // 构造买卖点标记 (markPoint)
+            const markPoints = [];
+            data.buys.forEach(b => {
+                markPoints.push({
+                    coord: [b[0], b[1]],
+                    value: b[2],
+                    itemStyle: { color: '#d900ff' }, // 紫色
+                    symbol: 'arrow',
+                    symbolRotate: 0, // 向上箭头
+                    symbolOffset: [0, 10],
+                    label: { position: 'bottom', formatter: '{b}' }
+                });
+            });
+            data.sells.forEach(s => {
+                markPoints.push({
+                    coord: [s[0], s[1]],
+                    value: s[2],
+                    itemStyle: { color: '#00ff00' }, // 绿色
+                    symbol: 'arrow',
+                    symbolRotate: 180, // 向下箭头
+                    symbolOffset: [0, -10],
+                    label: { position: 'top', formatter: '{b}' }
+                });
+            });
+
+            option = {
+                backgroundColor: '#1e1e1e',
+                title: {
+                    text: `缠论分析: ${symbol} - ${interval}`,
+                    left: 'center',
+                    textStyle: { color: '#fff' }
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' },
+                    backgroundColor: 'rgba(50,50,50,0.9)',
+                    borderColor: '#777',
+                    textStyle: { color: '#fff' }
+                },
+                axisPointer: { link: { xAxisIndex: 'all' } },
+                grid: [
+                    { left: '5%', right: '5%', height: '60%', top: '10%' }, // K线主图
+                    { left: '5%', right: '5%', height: '15%', top: '75%' }  // MACD副图
+                ],
+                xAxis: [
+                    {
+                        type: 'category',
+                        data: dates,
+                        gridIndex: 0,
+                        axisLine: { lineStyle: { color: '#777' } },
+                    },
+                    {
+                        type: 'category',
+                        data: dates,
+                        gridIndex: 1,
+                        axisLine: { show: false },
+                        axisLabel: { show: false },
+                    }
+                ],
+                yAxis: [
+                    {
+                        scale: true,
+                        gridIndex: 0,
+                        axisLine: { lineStyle: { color: '#777' } },
+                        splitLine: { show: true, lineStyle: { color: '#333' } }
+                    },
+                    {
+                        scale: true,
+                        gridIndex: 1,
+                        axisLine: { lineStyle: { color: '#777' } },
+                        splitLine: { show: false }
+                    }
+                ],
+                dataZoom: [
+                    { type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100 },
+                    { type: 'slider', xAxisIndex: [0, 1], bottom: 10 }
+                ],
+                series: [
+                    // 1. K线图
+                    {
+                        name: 'KLine',
+                        type: 'candlestick',
+                        data: data.ohlc,
+                        itemStyle: {
+                            color: '#ef232a', // 阳线红
+                            color0: '#14b143', // 阴线绿
+                            borderColor: '#ef232a',
+                            borderColor0: '#14b143'
+                        },
+                        markPoint: {
+                            data: markPoints,
+                            symbolSize: 15
+                        },
+                        markArea: {
+                            data: centerAreas
+                        }
+                    },
+                    // 2. 笔 (Bi) - 红色细线
+                    {
+                        name: '笔 (Bi)',
+                        type: 'line',
+                        data: mapLineData(data.bi, dates),
+                        smooth: false,
+                        showSymbol: true,
+                        symbol: 'circle',
+                        symbolSize: 4,
+                        lineStyle: { color: '#ff4d4d', width: 1.5, type: 'solid' },
+                        itemStyle: { color: '#ff4d4d' },
+                        connectNulls: true // 关键：允许跨越空值连接
+                    },
+                    // 3. 线段 (Segment) - 蓝色粗线
+                    {
+                        name: '线段 (Seg)',
+                        type: 'line',
+                        data: mapLineData(data.segments, dates),
+                        smooth: false,
+                        showSymbol: true,
+                        symbol: 'diamond',
+                        symbolSize: 8,
+                        lineStyle: { color: '#4d94ff', width: 3 },
+                        itemStyle: { color: '#4d94ff' },
+                        connectNulls: true,
+                        z: 5 // 图层置顶
+                    },
+                    // 4. MACD Diff
+                    {
+                        name: 'DIF',
+                        type: 'line',
+                        xAxisIndex: 1, yAxisIndex: 1,
+                        data: data.macd.diff,
+                        lineStyle: { color: '#ffffff', width: 1 },
+                        showSymbol: false
+                    },
+                    // 5. MACD DEA
+                    {
+                        name: 'DEA',
+                        type: 'line',
+                        xAxisIndex: 1, yAxisIndex: 1,
+                        data: data.macd.dea,
+                        lineStyle: { color: '#ffff00', width: 1 },
+                        showSymbol: false
+                    },
+                    // 6. MACD Bar
+                    {
+                        name: 'MACD',
+                        type: 'bar',
+                        xAxisIndex: 1, yAxisIndex: 1,
+                        data: data.macd.bar,
+                        itemStyle: {
+                            color: function(params) {
+                                return params.value > 0 ? 'rgba(239, 35, 42, 0.5)' : 'rgba(20, 177, 67, 0.5)';
+                            }
+                        }
+                    }
+                ]
+            };
+
+            myChart.setOption(option, true);
+        }
+
+        // 辅助：将 [TimeStr, Price] 映射到 ECharts 的 category 轴
+        // ECharts Line图如果x轴是category，data需要和xAxis数组对齐，空缺处填 null
+        function mapLineData(points, allDates) {
+            // 创建一个全是 null 的数组，长度等于 K 线数量
+            let result = new Array(allDates.length).fill(null);
+            
+            // 建立时间到索引的映射
+            let dateMap = {};
+            allDates.forEach((d, i) => dateMap[d] = i);
+            
+            points.forEach(p => {
+                let timeStr = p[0];
+                let price = p[1];
+                if (dateMap.hasOwnProperty(timeStr)) {
+                    let idx = dateMap[timeStr];
+                    result[idx] = price;
+                }
+            });
+            return result;
+        }
+    </script>
+</body>
+</html>

@@ -5,16 +5,16 @@ import numpy as np
 import sqlite3
 
 app = Flask(__name__)
-CORS(app)  # 允许跨域请求，这样你的 HTML 文件可以直接访问 API
+CORS(app)  # 允许跨域
 
 # ==========================================
-# 缠论核心计算类 (复用之前的逻辑，去除了绘图)
+# 缠论核心计算类 (完全同步之前的成功版本)
 # ==========================================
 class ChanLunProcessor:
     def __init__(self, db_path='hyperliquid_data.db'):
         self.db_path = db_path
 
-    def process(self, symbol, interval, limit=1000):
+    def process(self, symbol, interval, limit=200):
         # 1. 读取数据
         df = self.load_data(symbol, interval, limit)
         if df is None: return None
@@ -22,20 +22,24 @@ class ChanLunProcessor:
         # 2. 计算缠论结构
         df = self.find_fractals(df)
         bi_points = self.construct_bi(df)
+        
+        # 使用最新的线段生长算法
         seg_points = self.construct_segments(bi_points)
+        
         centers = self.identify_centers(bi_points)
         buys = self.detect_buy_points(df, bi_points)
         sells = self.detect_sell_points(df, bi_points)
 
-        # 3. 格式化数据为前端 ECharts 易读的格式
+        # 3. 格式化数据
         result = self.format_for_frontend(df, bi_points, seg_points, centers, buys, sells)
         return result
 
     def load_data(self, symbol, interval, limit):
         try:
             conn = sqlite3.connect(self.db_path)
-            # 读取更多数据以保证指标计算准确，最后裁切
-            read_limit = limit + 200 
+            # 为了保持 MACD 计算一致性，这里严格控制读取量
+            # 如果你想要更多历史数据但保持信号不变，需要更复杂的处理(如固定计算起始点)
+            # 这里为了复现之前的 5买4卖，我们严格使用 limit=200
             query = f"""
                 SELECT timestamp, open, high, low, close, volume 
                 FROM klines 
@@ -105,6 +109,7 @@ class ChanLunProcessor:
                         bi_points.append((index, row['low']))
         return bi_points
 
+    # === 同步：最新的线段生长算法 ===
     def construct_segments(self, bi_points):
         if not bi_points or len(bi_points) < 4: return []
         seg_points = [bi_points[0]]
@@ -114,13 +119,15 @@ class ChanLunProcessor:
         i = 2
         while i < len(bi_points):
             curr_point = bi_points[i]
-            if direction == 1:
+            if direction == 1: # 向上线段
                 if curr_point[1] > bi_points[i-1][1]: 
                     if curr_point[1] >= current_extremum[1]:
                         current_extremum = curr_point
                         current_extremum_idx = i
+                # 检查破坏
                 if i > current_extremum_idx + 2:
-                    p1, p2 = bi_points[current_extremum_idx + 1], bi_points[current_extremum_idx + 2]
+                    p1 = bi_points[current_extremum_idx + 1]
+                    p2 = bi_points[current_extremum_idx + 2]
                     p3 = bi_points[current_extremum_idx + 3] if current_extremum_idx + 3 < len(bi_points) else None
                     if p3 and p3[1] < p1[1] and p2[1] < current_extremum[1]:
                         seg_points.append(current_extremum)
@@ -129,13 +136,15 @@ class ChanLunProcessor:
                         current_extremum_idx = current_extremum_idx + 3
                         i = current_extremum_idx
                         continue
-            elif direction == -1:
+            elif direction == -1: # 向下线段
                 if curr_point[1] < bi_points[i-1][1]:
                     if curr_point[1] <= current_extremum[1]:
                         current_extremum = curr_point
                         current_extremum_idx = i
+                # 检查破坏
                 if i > current_extremum_idx + 2:
-                    p1, p2 = bi_points[current_extremum_idx + 1], bi_points[current_extremum_idx + 2]
+                    p1 = bi_points[current_extremum_idx + 1]
+                    p2 = bi_points[current_extremum_idx + 2]
                     p3 = bi_points[current_extremum_idx + 3] if current_extremum_idx + 3 < len(bi_points) else None
                     if p3 and p3[1] > p1[1] and p2[1] > current_extremum[1]:
                         seg_points.append(current_extremum)
@@ -176,6 +185,7 @@ class ChanLunProcessor:
             else: i += 1
         return centers
 
+    # === 同步：买点检测 ===
     def detect_buy_points(self, df, bi_points):
         buy_signals = []
         if len(bi_points) < 4: return buy_signals
@@ -196,6 +206,7 @@ class ChanLunProcessor:
                 buy_signals.append((curr_bottom[0], curr_bottom[1], 'B2'))
         return buy_signals
 
+    # === 同步：卖点检测 ===
     def detect_sell_points(self, df, bi_points):
         sell_signals = [] 
         if len(bi_points) < 4: return sell_signals
@@ -219,34 +230,23 @@ class ChanLunProcessor:
         return sell_signals
 
     def format_for_frontend(self, df, bi, seg, centers, buys, sells):
-        """将数据转换为 JSON 友好的格式"""
-        
-        # 转换时间索引为字符串列表
+        """格式化数据"""
         dates = df.index.strftime('%Y-%m-%d %H:%M').tolist()
-        
-        # ECharts Candle 格式: [Open, Close, Low, High]
-        # 注意：pandas 是 Open, High, Low, Close
         ohlc = df[['open', 'close', 'low', 'high']].values.tolist()
-        
         volumes = df['volume'].tolist()
-        
-        # MACD 数据
         macd_data = {
             'diff': df['diff'].fillna(0).tolist(),
             'dea': df['dea'].fillna(0).tolist(),
             'bar': df['macd'].fillna(0).tolist()
         }
         
-        # 辅助函数：转换 (Timestamp, Price) -> [TimeStr, Price]
         def fmt_points(points):
             return [[p[0].strftime('%Y-%m-%d %H:%M'), p[1]] for p in points]
         
         def fmt_signals(signals):
-            # [TimeStr, Price, Type]
             return [[s[0].strftime('%Y-%m-%d %H:%M'), s[1], s[2]] for s in signals]
 
         def fmt_centers(centers):
-            # [StartTimeStr, EndTimeStr, ZG, ZD]
             return [[c['start_date'].strftime('%Y-%m-%d %H:%M'), 
                      c['end_date'].strftime('%Y-%m-%d %H:%M'), 
                      c['zg'], c['zd']] for c in centers]
@@ -273,9 +273,11 @@ def get_data():
     symbol = request.args.get('symbol', 'BTC')
     interval = request.args.get('interval', '30m')
     
-    # 默认只取最近 500 条用于前端展示，避免浏览器卡顿
-    # 后端实际读取会稍微多一点用于计算
-    data = processor.process(symbol, interval, limit=500)
+    # === 关键修正 ===
+    # 将 limit 改回 200，以匹配之前成功的 Python 脚本的 MACD 计算环境
+    # 如果你想看更多K线，可以在 load_data 内部读取更多历史来计算MACD，然后裁切
+    # 但为了绝对的数据一致性，这里设为 200
+    data = processor.process(symbol, interval, limit=200)
     
     if data:
         return jsonify({'status': 'success', 'data': data})
@@ -283,6 +285,5 @@ def get_data():
         return jsonify({'status': 'error', 'message': 'No data found'}), 404
 
 if __name__ == '__main__':
-    # 启动服务，端口 5000
     print("Starting Flask server at http://localhost:5000")
     app.run(debug=True, port=5000)

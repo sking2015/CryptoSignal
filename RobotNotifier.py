@@ -4,10 +4,10 @@ import time
 from telegram import Bot
 
 # ===================== 配置 =====================
-# TOKEN = "8414564044:AAHTT2sl9fzrMu6jG2dyax1IHdwsjrGLtlM"
-TOKEN = "8245368359:AAGv1GSxYTwo9BeQ0G0DC7ytvDZQgiEVVzE"
-# CHAT_ID = "8052437792"  # 可以是你的个人ID或者群组ID
-CHAT_ID = "7808024731"
+TOKEN = "8414564044:AAHTT2sl9fzrMu6jG2dyax1IHdwsjrGLtlM"
+#TOKEN = "8245368359:AAGv1GSxYTwo9BeQ0G0DC7ytvDZQgiEVVzE"
+CHAT_ID = ["8052437792", "7808024731"]  # 可以是你的个人ID或者群组ID
+#CHAT_ID = "7808024731"
 MESSAGE_INTERVAL = 60  # 秒，检查条件的间隔
 # ===================== 模块内部状态 =====================
 _bot_instance = None
@@ -25,7 +25,8 @@ async def send_message_async(text: str):
     now = time.time()
     if now - _last_sent_time >= MESSAGE_INTERVAL:
         try:
-            await bot.send_message(chat_id=CHAT_ID, text=text)
+            for i in range(0,1):                
+                await bot.send_message(chat_id=CHAT_ID[i], text=text)
             _last_sent_time = now             
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 已发送:最新数据触发量化信号！ \n {text}")
         except Exception as e:

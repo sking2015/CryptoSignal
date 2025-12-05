@@ -81,7 +81,7 @@ class MarketDataManager:
             print(f"API请求失败: {e}")
             return []
 
-    def update_data(self, symbol, interval, lookback_days=30):
+    def update_data(self, symbol, interval, lookback_days=200):
         """核心逻辑：增量更新数据"""
         # 1. 获取本地最新时间
         last_ts = self.get_latest_timestamp(symbol, interval)

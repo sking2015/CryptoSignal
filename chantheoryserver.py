@@ -5,41 +5,47 @@ import numpy as np
 import sqlite3
 
 app = Flask(__name__)
-CORS(app)  # 允许跨域
+CORS(app)
 
-# ==========================================
-# 缠论核心计算类 (完全同步之前的成功版本)
-# ==========================================
 class ChanLunProcessor:
     def __init__(self, db_path='hyperliquid_data.db'):
         self.db_path = db_path
+        # 预读取缓冲区，保证指标计算准确
+        self.MACD_CALC_BUFFER = 5000 
 
-    def process(self, symbol, interval, limit=200):
-        # 1. 读取数据
-        df = self.load_data(symbol, interval, limit)
-        if df is None: return None
+    def process(self, symbol, interval, output_limit=2000):
+        # 1. 读取全量数据计算 MACD (读取 5000 条，保证 MACD 准确)
+        df_full = self.load_data_and_calc(symbol, interval, self.MACD_CALC_BUFFER)
+        if df_full is None: return None
 
-        # 2. 计算缠论结构
-        df = self.find_fractals(df)
-        bi_points = self.construct_bi(df)
+        # 2. 切片：模拟本地脚本的"视野"
+        # 只截取前端需要的 output_limit (比如 2000 条)
+        # 这样 bi/seg 的生成起点就是这 2000 条的开头，与本地脚本逻辑一致
+        real_limit = min(output_limit, len(df_full))
+        df_display = df_full.tail(real_limit).copy()
+
+        # 3. 计算结构
+        df_display = self.find_fractals(df_display)
         
-        # 使用最新的线段生长算法
+        # 【关键】bi_points 现在包含类型信息: (Time, Price, Type)
+        bi_points = self.construct_bi(df_display)
+        
+        # 线段生成 (使用之前优化的生长算法)
         seg_points = self.construct_segments(bi_points)
         
         centers = self.identify_centers(bi_points)
-        buys = self.detect_buy_points(df, bi_points)
-        sells = self.detect_sell_points(df, bi_points)
+        
+        # 检测买卖点 (逻辑已更新，支持类型检查)
+        buys = self.detect_buy_points(df_display, bi_points)
+        sells = self.detect_sell_points(df_display, bi_points)
 
-        # 3. 格式化数据
-        result = self.format_for_frontend(df, bi_points, seg_points, centers, buys, sells)
-        return result
+        return self.format_for_frontend(
+            df_display, bi_points, seg_points, centers, buys, sells
+        )
 
-    def load_data(self, symbol, interval, limit):
+    def load_data_and_calc(self, symbol, interval, limit):
         try:
             conn = sqlite3.connect(self.db_path)
-            # 为了保持 MACD 计算一致性，这里严格控制读取量
-            # 如果你想要更多历史数据但保持信号不变，需要更复杂的处理(如固定计算起始点)
-            # 这里为了复现之前的 5买4卖，我们严格使用 limit=200
             query = f"""
                 SELECT timestamp, open, high, low, close, volume 
                 FROM klines 
@@ -53,14 +59,18 @@ class ChanLunProcessor:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
             
-            # MACD 计算
+            # 截取最后的 limit 条
+            df = df.tail(limit)
+            
+            if len(df) < 50: return None 
+
             exp12 = df['close'].ewm(span=12, adjust=False).mean()
             exp26 = df['close'].ewm(span=26, adjust=False).mean()
             df['diff'] = exp12 - exp26
             df['dea'] = df['diff'].ewm(span=9, adjust=False).mean()
             df['macd'] = (df['diff'] - df['dea']) * 2
             
-            return df.tail(limit)
+            return df
         except Exception as e:
             print(f"DB Error: {e}")
             return None
@@ -79,37 +89,52 @@ class ChanLunProcessor:
                 df.iloc[i, df.columns.get_loc('fractal')] = -1
         return df
 
+    # ==========================================
+    # 构造笔：携带身份信息 (1=顶, -1=底)
+    # ==========================================
     def construct_bi(self, df):
         bi_points = [] 
         last_type = 0 
         fractals = df[df['fractal'] != 0]
+        
         for index, row in fractals.iterrows():
             curr_type = row['fractal']
+            
+            # 初始化第一个点
             if last_type == 0:
-                if curr_type == 1: point = (index, row['high'])
-                else: point = (index, row['low'])
+                if curr_type == 1: 
+                    # (Time, Price, Type)
+                    point = (index, row['high'], 1) 
+                else: 
+                    point = (index, row['low'], -1)
                 bi_points.append(point)
                 last_type = curr_type
                 continue
+            
+            # 底 -> 顶
             if curr_type == 1 and last_type == -1: 
                 if len(df.loc[bi_points[-1][0]:index]) > 3: 
-                    bi_points.append((index, row['high']))
+                    bi_points.append((index, row['high'], 1)) # 标记为顶(1)
                     last_type = 1
                 else:
+                    # 更新低点 (底还是底，类型不变)
                     if row['high'] > bi_points[-1][1]: 
                         bi_points.pop()
-                        bi_points.append((index, row['high']))
+                        bi_points.append((index, row['high'], 1))
+
+            # 顶 -> 底
             elif curr_type == -1 and last_type == 1: 
                 if len(df.loc[bi_points[-1][0]:index]) > 3:
-                    bi_points.append((index, row['low']))
+                    bi_points.append((index, row['low'], -1)) # 标记为底(-1)
                     last_type = -1
                 else:
+                    # 更新高点 (顶还是顶，类型不变)
                     if row['low'] < bi_points[-1][1]: 
                         bi_points.pop()
-                        bi_points.append((index, row['low']))
+                        bi_points.append((index, row['low'], -1))
         return bi_points
 
-    # === 同步：最新的线段生长算法 ===
+    # 线段算法 (兼容三元素元组)
     def construct_segments(self, bi_points):
         if not bi_points or len(bi_points) < 4: return []
         seg_points = [bi_points[0]]
@@ -119,12 +144,11 @@ class ChanLunProcessor:
         i = 2
         while i < len(bi_points):
             curr_point = bi_points[i]
-            if direction == 1: # 向上线段
+            if direction == 1:
                 if curr_point[1] > bi_points[i-1][1]: 
                     if curr_point[1] >= current_extremum[1]:
                         current_extremum = curr_point
                         current_extremum_idx = i
-                # 检查破坏
                 if i > current_extremum_idx + 2:
                     p1 = bi_points[current_extremum_idx + 1]
                     p2 = bi_points[current_extremum_idx + 2]
@@ -136,12 +160,11 @@ class ChanLunProcessor:
                         current_extremum_idx = current_extremum_idx + 3
                         i = current_extremum_idx
                         continue
-            elif direction == -1: # 向下线段
+            elif direction == -1:
                 if curr_point[1] < bi_points[i-1][1]:
                     if curr_point[1] <= current_extremum[1]:
                         current_extremum = curr_point
                         current_extremum_idx = i
-                # 检查破坏
                 if i > current_extremum_idx + 2:
                     p1 = bi_points[current_extremum_idx + 1]
                     p2 = bi_points[current_extremum_idx + 2]
@@ -185,52 +208,79 @@ class ChanLunProcessor:
             else: i += 1
         return centers
 
-    # === 同步：买点检测 ===
+    # ==========================================
+    # 买卖点检测：强制检查类型，杜绝底标卖
+    # ==========================================
     def detect_buy_points(self, df, bi_points):
         buy_signals = []
         if len(bi_points) < 4: return buy_signals
-        for i in range(3, len(bi_points), 2):
-            curr_bottom = bi_points[i]   
-            prev_top = bi_points[i-1]    
-            prev_bottom = bi_points[i-2] 
-            prev_top_prev = bi_points[i-3]
-            if curr_bottom[1] >= prev_top[1]: continue 
-            if curr_bottom[1] < prev_bottom[1]:
-                try:
-                    curr_macd = df.loc[prev_top[0]:curr_bottom[0]]['macd'].min()
-                    prev_macd = df.loc[prev_top_prev[0]:prev_bottom[0]]['macd'].min()
-                    if curr_macd < 0 and curr_macd > prev_macd:
-                         buy_signals.append((curr_bottom[0], curr_bottom[1], 'B1'))
-                except: pass
-            elif curr_bottom[1] > prev_bottom[1]:
-                buy_signals.append((curr_bottom[0], curr_bottom[1], 'B2'))
+        
+        # 遍历所有点
+        for i in range(2, len(bi_points)):
+            curr_node = bi_points[i]    # (Time, Price, Type)
+            
+            # 【终极防守】：如果不是底 (-1)，跳过！
+            if curr_node[2] != -1: 
+                continue
+                
+            prev_top = bi_points[i-1]
+            prev_bottom = bi_points[i-2]
+            
+            # 基础结构防守：底必须比前一个顶低
+            if curr_node[1] >= prev_top[1]: continue
+            
+            # 1. 一买 (B1)
+            if curr_node[1] < prev_bottom[1]:
+                if i >= 3:
+                    prev_top_prev = bi_points[i-3]
+                    try:
+                        curr_macd = df.loc[prev_top[0]:curr_node[0]]['macd'].sum()
+                        prev_macd = df.loc[prev_top_prev[0]:prev_bottom[0]]['macd'].sum()
+                        if curr_macd < 0 and curr_macd > prev_macd:
+                             buy_signals.append((curr_node[0], curr_node[1], 'B1'))
+                    except: pass
+            
+            # 2. 二买 (B2)
+            elif curr_node[1] > prev_bottom[1]:
+                buy_signals.append((curr_node[0], curr_node[1], 'B2'))
+
         return buy_signals
 
-    # === 同步：卖点检测 ===
     def detect_sell_points(self, df, bi_points):
         sell_signals = [] 
         if len(bi_points) < 4: return sell_signals
-        first_ts = bi_points[0][0]
-        start_idx = 3 if df.at[first_ts, 'fractal'] == -1 else 4
-        for i in range(start_idx, len(bi_points), 2):
-            curr_top = bi_points[i]      
-            prev_top = bi_points[i-2]    
-            prev_bottom = bi_points[i-1] 
-            prev_bottom_prev = bi_points[i-3] 
-            if curr_top[1] <= prev_bottom[1]: continue
-            if curr_top[1] > prev_top[1]:
-                try:
-                    curr_macd_max = df.loc[prev_bottom[0]:curr_top[0]]['macd'].max()
-                    prev_macd_max = df.loc[prev_bottom_prev[0]:prev_top[0]]['macd'].max()
-                    if curr_macd_max > 0 and curr_macd_max < prev_macd_max:
-                         sell_signals.append((curr_top[0], curr_top[1], 'S1'))
-                except: pass
-            elif curr_top[1] < prev_top[1]:
-                sell_signals.append((curr_top[0], curr_top[1], 'S2'))
+        
+        for i in range(2, len(bi_points)):
+            curr_node = bi_points[i] # (Time, Price, Type)
+            
+            # 【终极防守】：如果不是顶 (1)，跳过！
+            if curr_node[2] != 1:
+                continue
+                
+            prev_bottom = bi_points[i-1]
+            prev_top = bi_points[i-2]
+            
+            # 基础结构防守：顶必须比前一个底高
+            if curr_node[1] <= prev_bottom[1]: continue
+
+            # 1. 一卖 (S1)
+            if curr_node[1] > prev_top[1]:
+                if i >= 3:
+                    prev_bottom_prev = bi_points[i-3]
+                    try:
+                        curr_macd_max = df.loc[prev_bottom[0]:curr_node[0]]['macd'].sum()
+                        prev_macd_max = df.loc[prev_bottom_prev[0]:prev_top[0]]['macd'].sum()
+                        if curr_macd_max > 0 and curr_macd_max < prev_macd_max:
+                             sell_signals.append((curr_node[0], curr_node[1], 'S1'))
+                    except: pass
+            
+            # 2. 二卖 (S2)
+            elif curr_node[1] < prev_top[1]:
+                sell_signals.append((curr_node[0], curr_node[1], 'S2'))
+                
         return sell_signals
 
     def format_for_frontend(self, df, bi, seg, centers, buys, sells):
-        """格式化数据"""
         dates = df.index.strftime('%Y-%m-%d %H:%M').tolist()
         ohlc = df[['open', 'close', 'low', 'high']].values.tolist()
         volumes = df['volume'].tolist()
@@ -240,6 +290,7 @@ class ChanLunProcessor:
             'bar': df['macd'].fillna(0).tolist()
         }
         
+        # 前端不需要 Type 字段，只取前两个元素 [Time, Price]
         def fmt_points(points):
             return [[p[0].strftime('%Y-%m-%d %H:%M'), p[1]] for p in points]
         
@@ -263,22 +314,15 @@ class ChanLunProcessor:
             'sells': fmt_signals(sells)
         }
 
-# ==========================================
-# Flask 路由
-# ==========================================
 processor = ChanLunProcessor()
 
 @app.route('/api/data', methods=['GET'])
 def get_data():
     symbol = request.args.get('symbol', 'BTC')
     interval = request.args.get('interval', '30m')
-    
-    # === 关键修正 ===
-    # 将 limit 改回 200，以匹配之前成功的 Python 脚本的 MACD 计算环境
-    # 如果你想看更多K线，可以在 load_data 内部读取更多历史来计算MACD，然后裁切
-    # 但为了绝对的数据一致性，这里设为 200
-    data = processor.process(symbol, interval, limit=200)
-    
+    limit = int(request.args.get('limit', 2000))
+    # 修复：参数名统一为 output_limit
+    data = processor.process(symbol, interval, output_limit=limit)
     if data:
         return jsonify({'status': 'success', 'data': data})
     else:

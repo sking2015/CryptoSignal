@@ -1,3 +1,21 @@
+import sys
+import os
+
+# --- [路径修正] ---
+# 获取当前脚本所在目录 (tools)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 获取上级目录 (ChanLunBot) 的路径
+parent_dir = os.path.dirname(current_dir)
+# 构建 core 目录的路径
+core_dir = os.path.join(parent_dir, 'core')
+
+print("看一下core_dir",core_dir)
+
+
+# 将 core 目录加入到 Python 的搜索路径中
+if core_dir not in sys.path:
+    sys.path.append(core_dir)
+# ------------------
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates # [新增] 处理时间格式
@@ -8,9 +26,12 @@ from tqdm import tqdm
 def run_backtest(symbol='BTC', main_lvl='1h', sub_lvl='15m', limit=1000):
     print(f"🚀 开始回测 {symbol} - 主级别:{main_lvl} 次级别:{sub_lvl}")
     
+    db_path = os.path.join(core_dir, 'hyperliquid_data.db')
+     
     # 1. 初始化
     strategy = ChanLunStrategy()
-    mgr = MarketDataManager()
+    mgr = MarketDataManager(db_path=db_path)   
+    
     
     # 2. 自动拉取数据 (使用 detect_signals 里的逻辑保证对齐)
     # 我们这里手动计算一下倍率，确保数据足够

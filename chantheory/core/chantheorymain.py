@@ -1,4 +1,17 @@
 
+import sys
+import os
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 获取上级目录 (ChanLunBot) 的路径
+parent_dir = os.path.dirname(current_dir)
+# 构建 core 目录的路径
+root_dir =  os.path.dirname(parent_dir)
+
+# 将 core 目录加入到 Python 的搜索路径中
+if root_dir not in sys.path:
+    sys.path.append(root_dir)
+
 from chantheoryScan import ChanLunStrategy
 import asyncio
 from datetime import datetime

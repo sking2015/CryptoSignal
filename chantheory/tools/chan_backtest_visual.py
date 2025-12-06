@@ -134,4 +134,5 @@ def plot_results(df, buys, sells, symbol, interval):
 if __name__ == "__main__":
     # 在这里设置你想回测的参数
     # 建议: limit=1000 以查看更长的时间跨度
-    run_backtest(symbol='BNB', main_lvl='1h', sub_lvl='15m', limit=1000)
+    sybName = sys.argv[1]
+    run_backtest(symbol=sybName, main_lvl='30m', sub_lvl='5m', limit=1000)

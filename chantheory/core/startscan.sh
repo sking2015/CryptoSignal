@@ -6,7 +6,7 @@
 # --- 配置区 ---
 VENV_DIR="../../venv"                     # 虚拟环境目录
 LOG_FILE="./chantheory.log"           # 日志文件名
-MAIN_SCRIPT="./chantheory/core/chantheorymain.py" # 主程序路径
+MAIN_SCRIPT="./chantheorymain.py" # 主程序路径
 # --- 配置区结束 ---
 
 echo "--- 启动 Python 自动化程序 ---"

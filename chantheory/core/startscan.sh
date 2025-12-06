@@ -4,7 +4,7 @@
 # 描述: 启动 Python 程序到后台，并将输出重定向到日志文件。
 
 # --- 配置区 ---
-VENV_DIR="./venv"                     # 虚拟环境目录
+VENV_DIR="../../venv"                     # 虚拟环境目录
 LOG_FILE="./chantheory.log"           # 日志文件名
 MAIN_SCRIPT="./chantheory/core/chantheorymain.py" # 主程序路径
 # --- 配置区结束 ---

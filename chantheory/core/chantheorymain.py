@@ -2,6 +2,7 @@
 import sys
 import os
 
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 # 获取上级目录 (ChanLunBot) 的路径
 parent_dir = os.path.dirname(current_dir)
@@ -16,6 +17,7 @@ from chantheoryScan import ChanLunStrategy
 import asyncio
 from datetime import datetime
 from RobotNotifier import send_message_async
+import traceback
 
 async def main():
     scanner = ChanLunStrategy()
@@ -38,17 +40,17 @@ async def main():
     #         print(f"处理 {coin} 时出错: {e}")
     #         print(traceback.format_exc())    
 
-    last_run_hour = -1
-    last_run_half = -1  # 0 表示整点，1 表示半点
+    last_5m = -1
 
     while True:
         now = datetime.now()
         minute = now.minute
         
-        # 判断当前是否是整点/半点
-        current_half = 0 if minute < 30 else 1 if minute >= 30 else None
+        # 判断当前是否为5的倍数
+        # print("当前分钟数",minute)
+        # print("当前分钟数除以5",minute %5)
 
-        if last_run_hour != now.hour or last_run_half != current_half:       
+        if last_5m == -1 or minute %5 == 0:       
             
             #每一次检查时清空消息
             msgstr = ""
@@ -67,9 +69,10 @@ async def main():
             if msgstr != "":
                  await send_message_async(msgstr)
 
-            # 更新上一次执行记录
-            last_run_hour = now.hour
-            last_run_half = current_half            
+            # 更新上一次执行记录            
+            last_5m = minute
+            print("最后的5分钟",last_5m)
+                    
 
         # 每秒检查一次，保证不会漏
         await asyncio.sleep(1)             

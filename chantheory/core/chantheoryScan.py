@@ -196,7 +196,74 @@ class ChanLunStrategy:
             # 红柱缩短 (正值变小) 或者 已经翻绿
             if bar_curr < bar_prev: return True
             
-        return False        
+        return False   
+
+    def get_macd_history(self, df, idx):
+        """
+        智能回溯 MACD 历史状态 V2.0 (加入价格锚点)
+        功能: 找到当前波段峰值、上一个波段峰值，以及【峰值对应的股价】
+        """
+        curr_macd = df['macd'].iloc[idx]
+        if curr_macd == 0: 
+            return {'curr_peak': 0, 'prev_peak': 0, 'prev_peak_price': 0}
+        
+        is_red = curr_macd > 0
+        
+        # 1. 寻找当前波段 (Current Wave)
+        curr_peak = abs(curr_macd)
+        i = idx
+        while i >= 0:
+            val = df['macd'].iloc[i]
+            # 遇到变色，当前波段结束
+            if (is_red and val < 0) or (not is_red and val > 0):
+                break
+            curr_peak = max(curr_peak, abs(val))
+            i -= 1
+        
+        curr_cluster_start = i 
+        
+        # 2. 跨越中间的异色波段 (Gap Wave)
+        j = curr_cluster_start
+        found_intermediate = False 
+        
+        while j >= 0:
+            val = df['macd'].iloc[j]
+            # 如果我是红柱，我要找中间的绿柱海洋
+            if is_red:
+                if val < 0: found_intermediate = True 
+                if found_intermediate and val > 0: # 终于彼岸，到达上一个红波段
+                    break
+            else: # 如果我是绿柱
+                if val > 0: found_intermediate = True
+                if found_intermediate and val < 0:
+                    break
+            j -= 1
+            
+        # 3. 寻找上一个波段的峰值 (Previous Wave)
+        prev_peak = 0
+        prev_peak_price = 0 # 新增：记录上一个波峰出现时的收盘价
+        
+        if j >= 0: # 只有找到了上一个波段才进这里
+            k = j
+            while k >= 0:
+                val = df['macd'].iloc[k]
+                # 如果又变色了，说明上一个波段也找完了
+                if (is_red and val < 0) or (not is_red and val > 0):
+                    break
+                
+                # 记录最大值
+                if abs(val) > prev_peak:
+                    prev_peak = abs(val)
+                    # 关键修正：记录峰值时刻的 High 或 Close (这里用 High 更灵敏)
+                    prev_peak_price = df['high'].iloc[k] 
+                
+                k -= 1
+            
+        return {
+            'curr_peak': curr_peak,
+            'prev_peak': prev_peak,
+            'prev_peak_price': prev_peak_price # 返回上个山头的价格，用于比对
+        }
 
     def analyze_snapshot(self, symbol, main_lvl, df_main, df_sub):
         """V16.2 终极版: 一买/二买/三买 + V反 + 次级别共振"""
@@ -314,6 +381,83 @@ class ChanLunStrategy:
         
         if st['state'] == 'NEUTRAL' or st['state'] == 'WAITING_FOR_2B':
             
+            # ------------------------------------------------------------------
+            # 🚨 逻辑H: 趋势高潮一卖 (Climax Top / V16.8 强趋势保护版)
+            # ------------------------------------------------------------------
+            # 解决痛点: 在主升浪（强趋势）中途，因指标滞后导致的"假背驰"误报。
+            # 方案: 引入 slope (均线斜率) 过滤。
+            #      1. 如果斜率极陡 (slope > 0.6)，屏蔽普通背驰，只看严重高潮。
+            #      2. 如果斜率平缓，恢复普通背驰检测。
+            
+            if curr['close'] > curr['ma60']:
+                if rsi > 65: 
+                    
+                    # 1. 价格形态判定 (High Stalling)
+                    # 必须要有滞涨表现：收阴、长上影、或假突破
+                    is_stalling = False
+                    if curr['high'] > prev['high']: 
+                        if curr['close'] < curr['open'] or \
+                           curr['upper_shadow'] > curr['body'] * 1.5 or \
+                           curr['close'] < prev['high']: # 假突破
+                            is_stalling = True
+                    
+                    # 针对十字星/小星线 (波动率极低)
+                    if abs(curr['close'] - curr['open']) / curr['close'] < 0.003: 
+                        is_stalling = True
+
+                    if is_stalling:
+                        macd_stats = self.get_macd_history(df_main, curr_idx)
+                        curr_bar = abs(curr['macd'])
+                        prev_bar = abs(prev['macd'])
+                        
+                        # 计算背驰比率 (当前 / 前高)
+                        div_ratio = 1.0
+                        if macd_stats['prev_peak'] > 0:
+                            div_ratio = macd_stats['curr_peak'] / macd_stats['prev_peak']
+                        
+                        # 基础条件: 价格必须创新高 (相对于上一个波峰时刻)
+                        # 如果连价格都没创新高，那叫二卖，不叫背驰
+                        price_divergence = curr['high'] > macd_stats['prev_peak_price']
+                        
+                        # --- [趋势强度保护锁] ---
+                        # slope 是 MA60 的斜率，通常在 0 ~ 2 之间。
+                        # > 0.5 意味着非常陡峭的主升浪。
+                        is_strong_trend = slope > 0.6 
+                        
+                        # 判定A: 严重背驰 (Severe) -> 12.17 这种大顶
+                        # 动能直接腰斩 (< 0.6)。这种情况下，不管趋势多强，都得跑。
+                        # 不需要等待缩头 (is_shrinking)，形态一坏就跑。
+                        is_severe = div_ratio < 0.6 and price_divergence
+                        
+                        # 判定B: 普通背驰 (Standard) -> 容易误报的区域
+                        # 动能稍微弱一点 (0.6 ~ 0.85)。
+                        # 🛡️ 保护逻辑: 如果是强趋势 (is_strong_trend)，直接忽略普通背驰！
+                        # 只有当趋势没那么强，且柱子确实在缩短时，才允许卖出。
+                        is_shrinking = curr_bar < prev_bar
+                        is_standard = False
+                        if not is_strong_trend: # <--- 只有趋势不强时才看这个
+                            if div_ratio < 0.85 and price_divergence and is_shrinking:
+                                is_standard = True
+                        
+                        # 判定C: 疯牛内部衰竭 (RSI Extremes)
+                        # 针对 RSI 极高的情况，只要缩头就跑
+                        is_internal = False
+                        if rsi > 82: # 门槛提得很高
+                             if curr_bar < macd_stats['curr_peak'] * 0.7:
+                                 is_internal = True
+
+                        if is_severe or is_standard or is_internal:
+                             if curr['macd'] > 0: # 必须红柱
+                                 # 调试描述
+                                 debug_msg = f"(r={div_ratio:.2f}, s={slope:.2f})"
+                                 if is_severe: desc = f"一卖(严重背驰){debug_msg}"
+                                 elif is_standard: desc = f"一卖(背驰确认){debug_msg}"
+                                 else: desc = f"一卖(高潮){debug_msg}"
+                                 
+                                 st['state'] = 'WAITING_FOR_2S'; st['last_1s_price'] = curr['high']; st['last_1s_idx'] = curr_idx
+                                 return {"type": "1S", "action": "sell", "price": curr['close'], "desc": desc, "stop_loss": curr['high']*1.01}
+
+            # ------------------------------------------------------------------            
             # ------------------------------------------------------------------
             # 逻辑F: 三类卖点 (主跌浪加速) [新增]
             # ------------------------------------------------------------------

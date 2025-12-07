@@ -6,32 +6,37 @@
     <title>缠论真实回测可视化</title>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <style>
-        body { margin: 0; padding: 0; font-family: sans-serif; background-color: #1e1e1e; color: #ccc; }
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Roboto, sans-serif; background-color: #161616; color: #ccc; }
         .controls {
-            padding: 10px 20px;
-            background-color: #2d2d2d;
-            border-bottom: 1px solid #444;
+            padding: 12px 20px;
+            background-color: #252526;
+            border-bottom: 1px solid #333;
             display: flex;
             gap: 15px;
             align-items: center;
         }
         select, button, input {
-            padding: 5px 10px;
+            padding: 6px 12px;
             border-radius: 4px;
-            border: 1px solid #555;
+            border: 1px solid #444;
             background-color: #333;
-            color: white;
+            color: #eee;
             cursor: pointer;
             font-size: 14px;
+            outline: none;
         }
         button:hover { background-color: #444; }
-        .btn-green { background-color: #2ecc71; border-color: #27ae60; color: #fff; }
-        .btn-green:hover { background-color: #27ae60; }
-        #chart-container { width: 100%; height: 90vh; }
+        input:focus, select:focus { border-color: #007acc; }
+        .btn-green { background-color: #2da44e; border: none; color: #fff; font-weight: bold; }
+        .btn-green:hover { background-color: #2c974b; }
+        
+        #chart-container { width: 100%; height: 92vh; }
+        
         .loading {
             position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            font-size: 16px; display: none; color: white; background: rgba(0,0,0,0.8);
-            padding: 20px 40px; border-radius: 8px; z-index: 999; text-align: center;
+            font-size: 16px; display: none; color: white; background: rgba(0,0,0,0.85);
+            padding: 25px 50px; border-radius: 10px; z-index: 999; text-align: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
         }
     </style>
 </head>
@@ -60,27 +65,30 @@
         <select id="sub_lvl">
             <option value="5m">5m</option>
             <option value="15m" selected>15m</option>
-            <option value="1h">1h</option>
+            <option value="30m">30m</option>
             <option value="4h">4h</option>
         </select>
 
-        <label>回测数量:</label>
-        <input type="number" id="limit" value="1000" style="width: 60px;">
+        <label>数量:</label>
+        <input type="number" id="limit" value="1000" style="width: 70px;">
 
         <button class="btn-green" onclick="runBacktest()">▶ 开始回测</button>
-        <span id="status" style="margin-left:auto; font-size: 12px; color: #888;">就绪</span>
+        <span id="status" style="margin-left:auto; font-size: 13px; color: #888;">就绪</span>
     </div>
 
     <div id="chart-container"></div>
     <div id="loading" class="loading">
-        <div>🚀 正在进行真实回测...</div>
-        <div style="font-size:12px; color:#aaa; margin-top:5px;">(模拟逐K线扫描，请稍候)</div>
+        <div>🚀 正在进行回测运算...</div>
+        <div style="font-size:12px; color:#aaa; margin-top:8px;">(逐根K线模拟扫描中，请稍候)</div>
     </div>
 
     <script>
         var myChart = echarts.init(document.getElementById('chart-container'));
         
         window.addEventListener('resize', () => myChart.resize());
+
+        // 页面加载时自动运行一次
+        // runBacktest(); 
 
         function runBacktest() {
             const symbol = document.getElementById('symbol').value;
@@ -93,8 +101,6 @@
             loading.style.display = 'block';
             statusSpan.innerText = `正在回测 ${symbol}...`;
 
-            // 调用新的回测接口
-            //fetch(`http://localhost:5000/run_backtest?symbol=${symbol}&main_lvl=${main_lvl}&sub_lvl=${sub_lvl}&limit=${limit}`)
             fetch(`/run_backtest?symbol=${symbol}&main_lvl=${main_lvl}&sub_lvl=${sub_lvl}&limit=${limit}`)
                 .then(res => res.json())
                 .then(res => {
@@ -112,129 +118,169 @@
                     loading.style.display = 'none';
                     statusSpan.innerText = '连接失败';
                     console.error(err);
-                    alert('请确保 server_backtest.py 已启动');
+                    alert('连接失败，请检查 Python 服务是否启动');
                 });
         }
 
-function renderChart(data, symbol, interval) {
+        function renderChart(data, symbol, interval) {
             const dates = data.dates;
             
-            // 构造买卖点标记 (保持不变)
+            // --- 关键修改：修复买卖点标签显示 ---
+            // 后端数据格式: [Time, Price, Type, Desc]
+            // ECharts markPoint 需要 name 属性来显示 label
+            
             const markPoints = [];
             data.buys.forEach(b => {
                 markPoints.push({
-                    coord: [b[0], b[1]], value: b[2], itemStyle: { color: '#2ecc71' }, 
-                    symbol: 'arrow', symbolRotate: 0, symbolOffset: [0, 10], symbolSize: 15,
-                    label: { position: 'bottom', formatter: '{b}', fontWeight: 'bold' },
-                    tooltip: { formatter: b[3] }
+                    coord: [b[0], b[1]], 
+                    name: b[2], // 将 Type (如 1B) 放入 name
+                    value: b[1], 
+                    itemStyle: { color: '#2ecc71' }, 
+                    symbol: 'arrow', symbolRotate: 0, symbolOffset: [0, 10], symbolSize: 12,
+                    label: { 
+                        show: true, position: 'bottom', 
+                        formatter: '{b}', // {b} 代表 name，即显示 1B/2B/3B
+                        fontWeight: 'bold', color: '#2ecc71', fontSize: 11 
+                    },
+                    tooltip: { formatter: `时间: ${b[0]}<br>类型: ${b[2]}<br>说明: ${b[3]}` }
                 });
             });
             data.sells.forEach(s => {
                 markPoints.push({
-                    coord: [s[0], s[1]], value: s[2], itemStyle: { color: '#e74c3c' }, 
-                    symbol: 'arrow', symbolRotate: 180, symbolOffset: [0, -10], symbolSize: 15,
-                    label: { position: 'top', formatter: '{b}', fontWeight: 'bold' },
-                    tooltip: { formatter: s[3] }
+                    coord: [s[0], s[1]], 
+                    name: s[2], // 将 Type (如 2S) 放入 name
+                    value: s[1],
+                    itemStyle: { color: '#e74c3c' }, 
+                    symbol: 'arrow', symbolRotate: 180, symbolOffset: [0, -10], symbolSize: 12,
+                    label: { 
+                        show: true, position: 'top', 
+                        formatter: '{b}', // 显示 1S/2S
+                        fontWeight: 'bold', color: '#e74c3c', fontSize: 11
+                    },
+                    tooltip: { formatter: `时间: ${s[0]}<br>类型: ${s[2]}<br>说明: ${s[3]}` }
                 });
             });
 
-            // 判断成交量颜色的辅助函数 (涨红跌绿 或 涨绿跌红)
-            // 既然我们要绿涨红跌:
-            // 如果 收盘 > 开盘 (涨) -> 绿色 #14b143
-            // 如果 收盘 < 开盘 (跌) -> 红色 #ef232a
+            // 涨跌颜色判断
             const volColors = data.ohlc.map((item) => {
-                return item[1] >= item[0] ? '#14b143' : '#ef232a';
+                return item[1] >= item[0] ? '#20b2aa' : '#ff6347';
             });
 
             const option = {
-                backgroundColor: '#1e1e1e',
+                backgroundColor: '#161616',
                 animation: false,
-                title: { text: `真实回测: ${symbol} - ${interval}`, left: 'center', textStyle: { color: '#fff' } },
+                title: { text: `缠论策略回测: ${symbol} - ${interval}`, left: 'center', textStyle: { color: '#eee', fontSize: 16 } },
                 
-                // 提示框：所有坐标轴同步显示
+                // --- 关键修改：专业级 Tooltip ---
                 tooltip: { 
                     trigger: 'axis', 
-                    axisPointer: { type: 'cross' }, 
-                    backgroundColor: 'rgba(50,50,50,0.9)', 
-                    textStyle: { color: '#fff' },
+                    axisPointer: { type: 'cross', label: { backgroundColor: '#6a7985' } }, 
+                    backgroundColor: 'rgba(30,30,30,0.9)', 
+                    borderColor: '#444',
+                    borderWidth: 1,
+                    textStyle: { color: '#eee', fontSize: 13 },
                     formatter: function (params) {
-                        // 自定义 Tooltip 显示逻辑，防止太长遮挡
-                        let res = params[0].name + '<br/>';
-                        params.forEach(param => {
-                            if(param.seriesName === 'KLine') return; // K线数据太长不显示
-                            if(param.value !== undefined) {
-                                let val = param.value;
-                                if(typeof val === 'number') val = val.toFixed(2);
-                                res += `${param.marker} ${param.seriesName}: ${val}<br/>`;
-                            }
-                        });
-                        return res;
+                        if (!params || params.length === 0) return '';
+                        
+                        let date = params[0].name;
+                        let html = `<div style="font-weight:bold; margin-bottom:5px; border-bottom:1px solid #555; padding-bottom:3px;">${date}</div>`;
+                        
+                        // 寻找对应的数据
+                        let kline = params.find(p => p.seriesName === 'KLine');
+                        let ma60 = params.find(p => p.seriesName === 'MA60');
+                        let vol = params.find(p => p.seriesName === 'Volume');
+                        let rsi = params.find(p => p.seriesName === 'RSI');
+                        let macdBar = params.find(p => p.seriesName === 'MACD');
+                        let dif = params.find(p => p.seriesName === 'DIF');
+                        let dea = params.find(p => p.seriesName === 'DEA');
+
+                        if (kline) {
+                            // ECharts Candlestick data index: [index, open, close, low, high]
+                            let o = kline.data[1], c = kline.data[2], l = kline.data[3], h = kline.data[4];
+                            let clr = c >= o ? '#20b2aa' : '#ff6347'; // 涨绿跌红
+                            html += `<div style="color:${clr}">● Open: ${o}</div>`;
+                            html += `<div style="color:${clr}">● High: ${h}</div>`;
+                            html += `<div style="color:${clr}">● Low:  ${l}</div>`;
+                            html += `<div style="color:${clr}">● Close:${c}</div>`;
+                        }
+                        
+                        if (ma60) html += `<div style="color:#f39c12">MA60: ${ma60.value.toFixed(2)}</div>`;
+                        if (vol) html += `<div style="color:#aaa">Vol: ${Math.round(vol.value)}</div>`;
+                        if (rsi) html += `<div style="color:#d35400">RSI: ${rsi.value.toFixed(2)}</div>`;
+                        
+                        if (macdBar) {
+                            let mClr = macdBar.value > 0 ? '#ff6347' : '#20b2aa';
+                            html += `<br><div>MACD: <span style="color:${mClr}">${macdBar.value.toFixed(4)}</span></div>`;
+                            if (dif) html += `<div>DIF: ${dif.value.toFixed(4)}</div>`;
+                            if (dea) html += `<div>DEA: ${dea.value.toFixed(4)}</div>`;
+                        }
+                        
+                        return html;
                     }
                 },
                 
-                // 坐标轴指针链接：让4个图的光标同步
                 axisPointer: { link: { xAxisIndex: 'all' } },
 
-                // 布局网格：定义4个区域 (Top, Height)
                 grid: [
-                    { left: '5%', right: '5%', top: '5%', height: '45%' },   // 0. 主图 K线 (占比最大)
-                    { left: '5%', right: '5%', top: '53%', height: '10%' },  // 1. 成交量
-                    { left: '5%', right: '5%', top: '66%', height: '12%' },  // 2. MACD
-                    { left: '5%', right: '5%', top: '81%', height: '12%' }   // 3. RSI
+                    { left: '60px', right: '30px', top: '5%', height: '55%' },   // K线
+                    { left: '60px', right: '30px', top: '63%', height: '10%' },  // Volume
+                    { left: '60px', right: '30px', top: '76%', height: '10%' },  // MACD
+                    { left: '60px', right: '30px', top: '89%', height: '8%' }    // RSI
                 ],
 
-                // X轴配置：4个X轴，全部共享 data.dates，隐藏除了最后一个之外的标签
+                // --- 关键修改：时间刻度颜色变亮 ---
                 xAxis: [
-                    { type: 'category', data: dates, gridIndex: 0, axisLine: { show: false }, axisLabel: { show: false } },
+                    { 
+                        type: 'category', data: dates, gridIndex: 0, 
+                        axisLine: { lineStyle: { color: '#555' } }, 
+                        axisLabel: { show: false } // 主图不显示时间，太挤
+                    },
                     { type: 'category', data: dates, gridIndex: 1, axisLine: { show: false }, axisLabel: { show: false } },
                     { type: 'category', data: dates, gridIndex: 2, axisLine: { show: false }, axisLabel: { show: false } },
-                    { type: 'category', data: dates, gridIndex: 3, axisLine: { lineStyle: { color: '#555' } } } // 最底下的显示标签
+                    { 
+                        type: 'category', data: dates, gridIndex: 3, 
+                        axisLine: { lineStyle: { color: '#555' } },
+                        axisLabel: { color: '#e0e0e0', fontSize: 11 } // 最底部时间轴，亮白色
+                    }
                 ],
 
-                // Y轴配置：4个Y轴，分别对应4个Grid
                 yAxis: [
-                    { scale: true, gridIndex: 0, splitLine: { show: true, lineStyle: { color: '#333' } }, axisLine: { show: false }, axisLabel: { color: '#999' } },
-                    { scale: true, gridIndex: 1, splitLine: { show: false }, axisLabel: { show: false }, axisLine: { show: false } }, // Volume Y轴不显示标签
-                    { scale: true, gridIndex: 2, splitLine: { show: true, lineStyle: { color: '#333', type: 'dashed' } }, axisLabel: { color: '#999', fontSize: 10 } },
-                    { scale: true, gridIndex: 3, splitLine: { show: true, lineStyle: { color: '#333', type: 'dashed' } }, axisLabel: { color: '#999', fontSize: 10 }, min: 0, max: 100 }
+                    { scale: true, gridIndex: 0, splitLine: { show: true, lineStyle: { color: '#333' } }, axisLine: { show: false }, axisLabel: { color: '#aaa' } },
+                    { scale: true, gridIndex: 1, splitLine: { show: false }, axisLabel: { show: false }, axisLine: { show: false } },
+                    { scale: true, gridIndex: 2, splitLine: { show: true, lineStyle: { color: '#333', type: 'dashed' } }, axisLabel: { color: '#777', fontSize: 10 } },
+                    { scale: true, gridIndex: 3, splitLine: { show: true, lineStyle: { color: '#333', type: 'dashed' } }, axisLabel: { color: '#777', fontSize: 10 }, min: 0, max: 100 }
                 ],
 
-                // 缩放控件：控制所有X轴
                 dataZoom: [
-                    { type: 'inside', xAxisIndex: [0, 1, 2, 3], start: 70, end: 100 },
-                    { type: 'slider', xAxisIndex: [0, 1, 2, 3], bottom: 0, height: 20, borderColor: '#333', fillerColor: 'rgba(255,255,255,0.1)' }
+                    { type: 'inside', xAxisIndex: [0, 1, 2, 3], start: 80, end: 100 },
+                    { type: 'slider', xAxisIndex: [0, 1, 2, 3], bottom: 0, height: 15, borderColor: '#333', fillerColor: 'rgba(255,255,255,0.1)', textStyle: {color: '#aaa'} }
                 ],
 
-                // 数据系列
                 series: [
-                    // --- Grid 0: K线 + MA60 ---
+                    // --- Grid 0 ---
                     {
                         name: 'KLine', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: data.ohlc,
                         itemStyle: { 
-                            color: '#14b143', color0: '#ef232a', 
-                            borderColor: '#14b143', borderColor0: '#ef232a' 
+                            color: '#20b2aa', color0: '#ff6347', 
+                            borderColor: '#20b2aa', borderColor0: '#ff6347' 
                         },
                         markPoint: { data: markPoints }
                     },
                     {
                         name: 'MA60', type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: data.ma60,
-                        smooth: true, showSymbol: false, lineStyle: { color: '#f39c12', width: 2 }
+                        smooth: true, showSymbol: false, lineStyle: { color: '#f39c12', width: 2, opacity: 0.8 }
                     },
 
-                    // --- Grid 1: Volume ---
+                    // --- Grid 1 ---
                     {
                         name: 'Volume', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: data.volume,
-                        itemStyle: {
-                            color: (params) => { return volColors[params.dataIndex]; }
-                        }
+                        itemStyle: { color: (params) => volColors[params.dataIndex] }
                     },
 
-                    // --- Grid 2: MACD ---
+                    // --- Grid 2 ---
                     {
                         name: 'MACD', type: 'bar', xAxisIndex: 2, yAxisIndex: 2, data: data.macd.bar,
-                        itemStyle: {
-                            color: (params) => { return params.value > 0 ? '#14b143' : '#ef232a'; }
-                        }
+                        itemStyle: { color: (params) => params.value > 0 ? '#ff6347' : '#20b2aa' }
                     },
                     {
                         name: 'DIF', type: 'line', xAxisIndex: 2, yAxisIndex: 2, data: data.macd.diff,
@@ -245,15 +291,15 @@ function renderChart(data, symbol, interval) {
                         showSymbol: false, lineStyle: { color: '#ffff00', width: 1 }
                     },
 
-                    // --- Grid 3: RSI ---
+                    // --- Grid 3 ---
                     {
                         name: 'RSI', type: 'line', xAxisIndex: 3, yAxisIndex: 3, data: data.rsi,
                         showSymbol: false, lineStyle: { color: '#d35400', width: 1.5 },
                         markLine: {
                             symbol: 'none',
                             data: [
-                                { yAxis: 70, lineStyle: { color: '#ef232a', type: 'dashed' } }, // 超买线
-                                { yAxis: 30, lineStyle: { color: '#14b143', type: 'dashed' } }  // 超卖线
+                                { yAxis: 70, lineStyle: { color: '#ff6347', type: 'dashed' } },
+                                { yAxis: 30, lineStyle: { color: '#20b2aa', type: 'dashed' } }
                             ],
                             label: { show: false }
                         }

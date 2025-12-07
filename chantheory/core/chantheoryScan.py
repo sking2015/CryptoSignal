@@ -157,9 +157,46 @@ class ChanLunStrategy:
             is_ma_break = curr['close'] < curr['ma5'] and curr['close'] < curr['open']
             
             return (is_engulfing or is_pinbar or is_ma_break) or (is_high_volume and curr['close'] < curr['open'])
+        
+
+    def check_sub_structure(self, df_sub, mode='buy'):
+        """
+        次级别共振检查 (简化版区间套)
+        检查次级别是否存在底背驰，或者处于极度超卖/超买状态
+        """
+        if df_sub is None or len(df_sub) < 30: return False # 数据不足默认不共振? 或者默认通过? 建议保守点返回False
+        
+        # 为了速度，次级别只看最近的 MACD 和 RSI
+        curr = df_sub.iloc[-1]
+        
+        # 1. RSI 极值过滤 (最简单的共振)
+        # 如果主级别看涨，次级别必须不能在高位; 主级别看跌，次级别不能在低位
+        if mode == 'buy':
+            # 如果次级别 RSI 还在 70 以上，说明次级别还在冲顶，绝对不能买
+            if curr['rsi'] > 70: return False 
+            # 最好是次级别也处于低位
+            if curr['rsi'] < 40: return True 
+            
+        elif mode == 'sell':
+            if curr['rsi'] < 30: return False
+            if curr['rsi'] > 60: return True
+
+        # 2. MACD 柱子缩短 (动能衰竭)
+        # 比较最近两根柱子
+        bar_curr = curr['macd']
+        bar_prev = df_sub.iloc[-2]['macd']
+        
+        if mode == 'buy':
+            # 绿柱缩短 (负值变大) 或者 已经翻红
+            if bar_curr > bar_prev: return True
+        elif mode == 'sell':
+            # 红柱缩短 (正值变小) 或者 已经翻绿
+            if bar_curr < bar_prev: return True
+            
+        return False        
 
     def analyze_snapshot(self, symbol, main_lvl, df_main, df_sub):
-        """V16.0: 左侧背驰 + 右侧V反修正"""
+        """V16.1: 左侧背驰(含次级别共振) + 右侧V反修正 + 完整二买卖"""
         if df_main is None or len(df_main) < 100: return None
         
         # 状态 Key
@@ -184,31 +221,26 @@ class ChanLunStrategy:
         # 🟢 买点探测 (Buy Side)
         # ==============================================================================
         
-        # [V16 修正] 如果在 2B 等待期触发止损，不要只切回 NEUTRAL，要检查是否立刻 V反
+        # 1. 状态维护：等待二买确认
         if st['state'] == 'WAITING_FOR_2B':
-            if curr_idx - st['last_1b_idx'] > 60: # 超时
+            if curr_idx - st['last_1b_idx'] > self.EXPIRATION_BARS: # 超时
                 st['state'] = 'NEUTRAL'
-            
-            # 止损检测
-            elif curr['close'] < st['last_1b_price']:
-                # 触发止损，转为 NEUTRAL，但让后续逻辑立刻检查是否有右侧买点
+            elif curr['close'] < st['last_1b_price']: # 破前低止损
                 st['state'] = 'NEUTRAL' 
         
         if st['state'] == 'NEUTRAL' or st['state'] == 'WAITING_FOR_1S':
             
-            # ----------------------------------------------------
-            # 逻辑A: 左侧抄底 (恐慌/背驰) - 维持 V15 逻辑
-            # ----------------------------------------------------
+            # --- 逻辑A: 左侧抄底 ---
             is_left_signal = False
             signal_desc = ""
 
-            # 1. 恐慌底
+            # A1. 恐慌底 (无需次级别，直接接飞刀)
             if curr['close'] < curr['ma60'] and rsi < rsi_panic_buy:
                 if curr['volume'] > curr['vol_ma5'] * vol_mult:
                     if curr['close'] > curr['open'] or curr['lower_shadow'] > curr['body']*2:
                         is_left_signal = True; signal_desc = "一买(恐慌V反)"
 
-            # 2. 结构背驰
+            # A2. 结构背驰 (【关键】加入次级别验证)
             if not is_left_signal and last_pivot['type'] == -1: 
                 if curr['close'] < curr['ma60'] and rsi < 65:
                     idx_bot_1 = pivots[-3]['idx']
@@ -223,9 +255,14 @@ class ChanLunStrategy:
                         diff_1 = pivots[-3].get('diff', -999); diff_2 = curr['diff']
                         rsi_1 = pivots[-3].get('rsi', 0); rsi_2 = curr['rsi']
                         
-                        if (area_2 < area_1 or diff_2 > diff_1 or rsi_2 > rsi_1): 
-                            if self.check_trigger(curr, prev, vol_mult, 'buy'):
-                                is_left_signal = True; signal_desc = "一买(结构背驰)"
+                        # 主级别背驰条件
+                        main_div = (area_2 < area_1 or diff_2 > diff_1 or rsi_2 > rsi_1)
+                        
+                        if main_div: 
+                            # 【新增】次级别共振检查
+                            if self.check_sub_structure(df_sub, mode='buy'):
+                                if self.check_trigger(curr, prev, vol_mult, 'buy'):
+                                    is_left_signal = True; signal_desc = "一买(区间套背驰)"
 
             if is_left_signal:
                 st['state'] = 'WAITING_FOR_2B'
@@ -233,35 +270,21 @@ class ChanLunStrategy:
                 st['last_1b_idx'] = curr_idx
                 return {"type": "1B", "action": "buy", "price": curr['close'], "desc": signal_desc, "stop_loss": curr['low']*0.98}
 
-            # ----------------------------------------------------
-            # [V16 新增] 逻辑B: 右侧补救 (V型反转/收复失地)
-            # 专门解决: 左侧止损后，价格迅速拉回的情况
-            # ----------------------------------------------------
-            # 条件: 
-            # 1. 处于相对低位 (MA60下方 或 RSI < 50)
-            # 2. 上一根是阴线创新低，或者刚刚经历了下跌
-            # 3. 当前根 强势站上 MA5 (Close > MA5)
-            # 4. RSI 勾头向上 ( > 昨天的 RSI )
-            
+            # --- 逻辑B: 右侧V反 (无需次级别) ---
             if curr['close'] < curr['ma60'] or rsi < 50:
-                # 必须是阳线且站上MA5
                 if curr['close'] > curr['ma5'] and curr['close'] > curr['open']:
-                    # 必须是刚从底部起来 (ZigZag 最后一笔是向下)
                     if last_pivot['type'] == -1:
-                        # 检查是否是"有力"的反转
-                        # a. 阳包阴
                         is_engulf = curr['close'] > prev['open'] and prev['close'] < prev['open']
-                        # b. 伴随放量 (1.2倍即可，右侧不需要太恐慌的量)
                         is_vol = curr['volume'] > curr['vol_ma5'] * 1.2
-                        # c. RSI 明确金叉/拐头
                         is_rsi_up = curr['rsi'] > prev['rsi'] + 2
                         
                         if (is_engulf or is_vol) and is_rsi_up:
                              st['state'] = 'WAITING_FOR_2B'
-                             st['last_1b_price'] = curr['low'] # 更新新的止损位
+                             st['last_1b_price'] = curr['low']
                              st['last_1b_idx'] = curr_idx
                              return {"type": "1B", "action": "buy", "price": curr['close'], "desc": "一买(右侧V反)", "stop_loss": curr['low']*0.99}
 
+        # --- 逻辑C: 二买探测 ---
         elif st['state'] == 'WAITING_FOR_2B':
             if curr['close'] < st['last_1b_price']:
                 st['state'] = 'NEUTRAL'; return None
@@ -273,17 +296,17 @@ class ChanLunStrategy:
                 if confirmed_pivot['ts'] != st['last_pivot_ts']:
                     if confirmed_pivot['price'] > st['last_1b_price']: 
                         check_range = df_main.iloc[st['last_1b_idx'] : curr_idx]
-                        if (check_range['diff'] > 0).any():
+                        if (check_range['diff'] > 0).any(): # 零轴验证
                             if curr['close'] > confirmed_pivot['price']:
                                 st['last_pivot_ts'] = confirmed_pivot['ts']
                                 return {"type": "2B", "action": "buy", "price": curr['close'], "desc": "二买(回踩确认)", "stop_loss": confirmed_pivot['price']}
 
         # ==============================================================================
-        # 🔴 卖点探测 (Sell Side) - 保持 V15 逻辑
+        # 🔴 卖点探测 (Sell Side)
         # ==============================================================================
         
         if st['state'] == 'WAITING_FOR_2S':
-            if curr_idx - st['last_1s_idx'] > 60:
+            if curr_idx - st['last_1s_idx'] > self.EXPIRATION_BARS:
                 st['state'] = 'NEUTRAL'
         
         if st['state'] == 'NEUTRAL' or st['state'] == 'WAITING_FOR_2B':
@@ -301,16 +324,22 @@ class ChanLunStrategy:
                         diff_1 = pivots[-3].get('diff', 999); diff_2 = curr['diff']
                         rsi_1 = pivots[-3].get('rsi', 100); rsi_2 = curr['rsi']
                         
-                        if (area_2 < area_1 or diff_2 < diff_1 or rsi_2 < rsi_1): 
-                            if self.check_trigger(curr, prev, vol_mult, 'sell'):
-                                st['state'] = 'WAITING_FOR_2S'
-                                st['last_1s_price'] = curr['high']
-                                st['last_1s_idx'] = curr_idx
-                                return {"type": "1S", "action": "sell", "price": curr['close'], "desc": "一卖(多维力竭)", "stop_loss": curr['high']*1.01}
+                        main_div = (area_2 < area_1 or diff_2 < diff_1 or rsi_2 < rsi_1)
+                        
+                        if main_div: 
+                            # 【新增】次级别卖点共振
+                            if self.check_sub_structure(df_sub, mode='sell'):
+                                if self.check_trigger(curr, prev, vol_mult, 'sell'):
+                                    st['state'] = 'WAITING_FOR_2S'
+                                    st['last_1s_price'] = curr['high']
+                                    st['last_1s_idx'] = curr_idx
+                                    return {"type": "1S", "action": "sell", "price": curr['close'], "desc": "一卖(区间套背驰)", "stop_loss": curr['high']*1.01}
 
+        # --- 逻辑D: 二卖探测 ---
         elif st['state'] == 'WAITING_FOR_2S':
             if curr['close'] > st['last_1s_price']:
                 st['state'] = 'NEUTRAL'; return None
+            
             if slope > self.SLOPE_THRESHOLD: return None
             if rsi < 30: return None 
 
@@ -324,7 +353,6 @@ class ChanLunStrategy:
                                 return {"type": "2S", "action": "sell", "price": curr['close'], "desc": "二卖(反抽不过)", "stop_loss": confirmed_pivot['price']}
 
         return None
-        
 
     def get_time_ratio(self, main_lvl, sub_lvl):
         lv_map = {'5m':5, '15m':15, '30m':30, '1h':60, '2h':120, '4h':240, '1d':1440}
@@ -349,7 +377,7 @@ class ChanLunStrategy:
         
         df_main = self.calculate_indicators(df_main)
         
-        signal = self.analyze_snapshot(df_main, df_sub)
+        signal = self.analyze_snapshot(symbol,main_lvl,df_main, df_sub)
         
         if signal:
             return self.print_signal(symbol, signal['desc'], main_lvl, sub_lvl, signal['price'], signal['stop_loss'], is_buy=(signal['action']=='buy'))

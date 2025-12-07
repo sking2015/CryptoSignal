@@ -1,8 +1,17 @@
+import sys
+import os
+
 import pandas as pd
 import numpy as np
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request,render_template
 from flask_cors import CORS
 import time
+
+# --- [路径修正] 确保能引用到 core 目录 ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+core_dir = os.path.join(current_dir, 'core') 
+if core_dir not in sys.path:
+    sys.path.append(core_dir)
 
 from chantheoryScan import ChanLunStrategy
 from hyperliquidDataMgr import MarketDataManager
@@ -15,6 +24,10 @@ CORS(app)
 db_path = 'hyperliquid_data.db'
 mgr = MarketDataManager(db_path=db_path)
 strategy = ChanLunStrategy()
+
+@app.route('/')
+def index():
+    return render_template('index.html')
 
 @app.route('/run_backtest')
 def run_backtest_endpoint():

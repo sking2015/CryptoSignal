@@ -94,7 +94,8 @@
             statusSpan.innerText = `正在回测 ${symbol}...`;
 
             // 调用新的回测接口
-            fetch(`http://localhost:5000/run_backtest?symbol=${symbol}&main_lvl=${main_lvl}&sub_lvl=${sub_lvl}&limit=${limit}`)
+            //fetch(`http://localhost:5000/run_backtest?symbol=${symbol}&main_lvl=${main_lvl}&sub_lvl=${sub_lvl}&limit=${limit}`)
+            fetch(`/run_backtest?symbol=${symbol}&main_lvl=${main_lvl}&sub_lvl=${sub_lvl}&limit=${limit}`)
                 .then(res => res.json())
                 .then(res => {
                     loading.style.display = 'none';

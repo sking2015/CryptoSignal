@@ -382,6 +382,7 @@ class ChanLunStrategy:
         df_sub = self.data_manager.load_data_for_analysis(symbol, sub_lvl, limit=sub_limit)
         
         df_main = self.calculate_indicators(df_main)
+        df_sub = self.calculate_indicators(df_sub)
         
         signal = self.analyze_snapshot(symbol,main_lvl,df_main, df_sub)
         

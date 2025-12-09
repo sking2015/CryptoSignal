@@ -19,7 +19,7 @@ app = Flask(__name__)
 CORS(app)
 
 # 初始化
-db_path = 'core/hyperliquid_data.db'
+db_path = 'hyperliquid_data.db'
 mgr = MarketDataManager(db_path=db_path)
 strategy = ChanLunStrategy(mgr)
 

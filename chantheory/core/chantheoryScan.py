@@ -176,13 +176,12 @@ class ChanLunStrategy:
         return df
 
     # ---------------------------------------------------------
-    # 5. 核心分析逻辑 V38.0 (The Trinity)
+    # 5. 核心分析逻辑 V39.0 (逻辑防火墙版)
     # ---------------------------------------------------------
     def analyze_snapshot(self, symbol, main_lvl, df_main, df_sub):
         if df_main is None or len(df_main) < 100: return None
         
         curr = df_main.iloc[-1]
-        prev = df_main.iloc[-2]
         price = curr['close']
         
         merged_bars = self.preprocess_klines(df_main)
@@ -190,26 +189,21 @@ class ChanLunStrategy:
         
         if len(bi_list) < 5: return None
         
-        # 关键变量定义
-        last_bi = bi_list[-1]    # 正在走或刚走完的一笔
-        prev_bi = bi_list[-2]    # 上一笔
-        compare_bi = bi_list[-3] # 同向对比笔 (用于背驰比较)
-        zs = self.get_zhongshu(bi_list) # 最近的一个中枢
+        # 关键变量
+        last_bi = bi_list[-1]    
+        compare_bi = bi_list[-3] 
+        zs = self.get_zhongshu(bi_list) 
         
         # ========================================================
         # 🛡️ 优先级 0: 量化特种兵 (PanicS & RocketB)
-        # 逻辑：非结构性行情，直接根据动能和波动率干预
         # ========================================================
-        
-        # PanicS (恐慌瀑布): 放量跌破布林下轨
         if price < curr['lower'] and curr['close'] < curr['open']:
              if curr['volume'] > curr['vol_ma'] * self.VOL_MULTIPLIER:
-                 # 避免在地板上做空 (RSI > 20)
                  if curr['rsi'] > 20: 
+                     # 特种兵的止损设为当前K线的高点
                      return {"type": "PanicS", "action": "sell", "price": price, 
                             "desc": "恐慌抛售(放量破下轨)", "stop_loss": curr['high']}
                             
-        # RocketB (火箭发射): 放量突破布林上轨
         if price > curr['upper'] and curr['close'] > curr['open']:
              if curr['volume'] > curr['vol_ma'] * self.VOL_MULTIPLIER:
                  if curr['rsi'] < 80:
@@ -217,68 +211,78 @@ class ChanLunStrategy:
                             "desc": "火箭发射(放量破上轨)", "stop_loss": curr['low']}
 
         # ========================================================
-        # 🔴 卖点体系 (1S, 2S, 3S) - 刚好反过来
+        # 🔴 卖点体系 (Sell Signals)
+        # 🛑 核心原则：做空时，价格必须 < 止损价
         # ========================================================
         
-        # 【1S: 第一类卖点】(趋势背驰)
-        # 条件：向上笔 + 创新高 + 面积背驰
+        # 【1S: 一卖】(趋势背驰)
         if last_bi['type'] == 1: 
-            if last_bi['end_val'] > compare_bi['end_val']: # 创新高
-                if last_bi['macd_area'] < compare_bi['macd_area'] * self.DIVERGENCE_FACTOR: # 动力衰竭
-                    # 辅助确认：K线滞涨
-                    if curr['close'] < curr['open']:
-                        return {"type": "1S", "action": "sell", "price": price, 
-                               "desc": f"一卖(顶背驰) 力度衰竭", "stop_loss": last_bi['end_val']}
+            if last_bi['end_val'] > compare_bi['end_val']: 
+                if last_bi['macd_area'] < compare_bi['macd_area'] * self.DIVERGENCE_FACTOR: 
+                    # 🛑 防火墙：确认价格没有突破结构高点
+                    stop_loss = last_bi['end_val']
+                    if price < stop_loss: 
+                        if curr['close'] < curr['open']:
+                            return {"type": "1S", "action": "sell", "price": price, 
+                                   "desc": f"一卖(顶背驰)", "stop_loss": stop_loss}
         
-        # 【2S: 第二类卖点】(结构确认)
-        # 条件：向上笔 + 不创新高 (Lower High)
+        # 【2S: 二卖】(反弹不过高)
         if last_bi['type'] == 1:
-            if last_bi['end_val'] < compare_bi['end_val']: # 没过前高
-                # 辅助确认：RSI 没过热
-                if curr['rsi'] < 70 and curr['close'] < curr['open']:
-                    return {"type": "2S", "action": "sell", "price": price, 
-                           "desc": f"二卖(反弹不过高)", "stop_loss": last_bi['end_val']}
+            if last_bi['end_val'] < compare_bi['end_val']: 
+                stop_loss = last_bi['end_val']
+                # 🛑 防火墙
+                if price < stop_loss:
+                    if curr['rsi'] < 70 and curr['close'] < curr['open']:
+                        return {"type": "2S", "action": "sell", "price": price, 
+                               "desc": f"二卖(结构确认)", "stop_loss": stop_loss}
 
-        # 【3S: 第三类卖点】(中枢破坏/反抽)
-        # 条件：中枢存在 + 向上笔 + 高点 < ZD (根本摸不到中枢下沿)
+        # 【3S: 三卖】(离开中枢后反抽不过 ZD)
         if zs and last_bi['type'] == 1:
             if last_bi['end_val'] < zs['zd']:
-                # 这是一个极其危险的信号，往往对应主跌浪
-                if curr['close'] < curr['open']:
-                    return {"type": "3S", "action": "sell", "price": price, 
-                           "desc": f"三卖(确认跌势) 阻力:{zs['zd']:.2f}", "stop_loss": zs['zd']}
+                # 3S的理论止损是 ZD (中枢下沿)
+                stop_loss = zs['zd'] 
+                
+                # 🛑 防火墙：如果价格已经涨回 ZD 上方，说明不是3卖，是中枢震荡
+                if price < stop_loss:
+                    if curr['close'] < curr['open']:
+                        return {"type": "3S", "action": "sell", "price": price, 
+                               "desc": f"三卖(确认跌势)", "stop_loss": stop_loss}
 
         # ========================================================
-        # 🟢 买点体系 (1B, 2B, 3B)
+        # 🟢 买点体系 (Buy Signals)
+        # 🛑 核心原则：做多时，价格必须 > 止损价
         # ========================================================
 
-        # 【1B: 第一类买点】(趋势背驰)
-        # 条件：向下笔 + 创新低 + 面积背驰
+        # 【1B: 一买】(底背驰)
         if last_bi['type'] == -1:
-            if last_bi['end_val'] < compare_bi['end_val']: # 创新低
-                if last_bi['macd_area'] < compare_bi['macd_area'] * self.DIVERGENCE_FACTOR: # 动力衰竭
-                    # 辅助确认：K线止跌 (阳包阴或下影线)
-                    if curr['close'] > curr['open']:
-                        return {"type": "1B", "action": "buy", "price": price, 
-                               "desc": f"一买(底背驰) 力度衰竭", "stop_loss": last_bi['end_val']}
+            if last_bi['end_val'] < compare_bi['end_val']: 
+                if last_bi['macd_area'] < compare_bi['macd_area'] * self.DIVERGENCE_FACTOR: 
+                    stop_loss = last_bi['end_val']
+                    # 🛑 防火墙：确认价格没有跌破结构低点 (虽然底背驰通常是在新低时发，但这里指的是笔结束后的确认)
+                    if price > stop_loss:
+                        if curr['close'] > curr['open']:
+                            return {"type": "1B", "action": "buy", "price": price, 
+                                   "desc": f"一买(底背驰)", "stop_loss": stop_loss}
 
-        # 【2B: 第二类买点】(结构确认)
-        # 条件：向下笔 + 不创新低 (Higher Low)
+        # 【2B: 二买】(回踩不破低)
         if last_bi['type'] == -1:
-            if last_bi['end_val'] > compare_bi['end_val']: # 没破前低
-                # 辅助确认：RSI 抬头
-                if curr['rsi'] > prev['rsi'] and curr['close'] > curr['open']:
-                    return {"type": "2B", "action": "buy", "price": price, 
-                           "desc": f"二买(回踩不破低)", "stop_loss": last_bi['end_val']}
+            if last_bi['end_val'] > compare_bi['end_val']: 
+                stop_loss = last_bi['end_val']
+                # 🛑 防火墙
+                if price > stop_loss:
+                    if curr['rsi'] > 50 and curr['close'] > curr['open']: # 稍微加强RSI要求
+                        return {"type": "2B", "action": "buy", "price": price, 
+                               "desc": f"二买(结构确认)", "stop_loss": stop_loss}
 
-        # 【3B: 第三类买点】(中枢破坏/回踩)
-        # 条件：中枢存在 + 向下笔 + 低点 > ZG (回踩不进中枢上沿)
+        # 【3B: 三买】(离开中枢后回踩不破 ZG)
         if zs and last_bi['type'] == -1:
             if last_bi['end_val'] > zs['zg']:
-                # 这是主升浪的特征
-                if curr['close'] > curr['open']:
-                    return {"type": "3B", "action": "buy", "price": price, 
-                           "desc": f"三买(空中加油) 支撑:{zs['zg']:.2f}", "stop_loss": zs['zg']}
+                stop_loss = zs['zg']
+                # 🛑 防火墙：如果价格已经跌回 ZG 下方，说明不是3买
+                if price > stop_loss:
+                    if curr['close'] > curr['open']:
+                        return {"type": "3B", "action": "buy", "price": price, 
+                               "desc": f"三买(空中加油)", "stop_loss": stop_loss}
 
         return None
 

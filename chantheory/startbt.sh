@@ -50,6 +50,8 @@ gunicorn \
   --pid "$LOG_DIR/$APP_NAME.pid" \
   "$APP_MODULE"
 
+sleep 1
+
 PID=$(cat "$LOG_DIR/$APP_NAME.pid")
 echo "✅ Gunicorn 服务已启动 (Timeout: ${TIMEOUT}s, Workers: ${WORKERS})。"
 echo "进程 ID: $PID"

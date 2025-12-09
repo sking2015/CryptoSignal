@@ -33,12 +33,8 @@ echo "进程 ID (PID): $PID"
 # 将 PID 写入文件，供停止脚本使用
 echo "$PID" > ./chantheory.pid
 
-gunicorn -w 4 -b 0.0.0.0:5000 -D --access-logfile ./access.log --error-logfile ./error.log chantheoryserver:app
-
 # 4. 退出虚拟环境（可选，但推荐保留终端在基础环境）
 deactivate
 echo "虚拟环境已退出。"
 
 echo "你可以使用 'tail -f $LOG_FILE' 查看日志。"
-
-echo "access.log和error.log分别记录回测系统的访问日志和错误日志"

@@ -72,7 +72,8 @@ async def main():
 
 
             if msgstr != "":
-                 await send_message_async(msgstr)
+                #  await send_message_async(msgstr)
+                print(msgstr)
 
             # 更新上一次执行记录            
             last_5m = minute

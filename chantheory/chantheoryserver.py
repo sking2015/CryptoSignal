@@ -21,7 +21,8 @@ CORS(app)
 # 初始化
 db_path = 'core/hyperliquid_data.db'
 mgr = MarketDataManager(db_path=db_path)
-strategy = ChanLunStrategy()
+strategy = ChanLunStrategy(mgr)
+
 
 @app.route('/')
 def index():
@@ -33,6 +34,7 @@ def run_backtest_endpoint():
     main_lvl = request.args.get('main_lvl', '1h')
     sub_lvl = request.args.get('sub_lvl', '15m')
     limit = int(request.args.get('limit', 1000))
+
 
     print(f"🚀 接到回测请求: {symbol} {main_lvl}/{sub_lvl} (Limit: {limit})")
     
@@ -86,15 +88,24 @@ def run_backtest_endpoint():
     if hasattr(strategy, 'reset_state'):
         strategy.reset_state()
 
+
+    # print("看一下df_main_full")
+    # print(df_main_full)
+
     # 模拟逐根K线扫描
     for i in range(start_idx, len(df_main_full)):
         curr_main_df = df_main_full.iloc[:i+1] 
         current_time = curr_main_df.iloc[-1]['timestamp']
+
+        # print("current_time",current_time)
+
+
         
         # 对齐次级别时间
         curr_sub_df = df_sub_full[df_sub_full['timestamp'] <= current_time]
         
         # 调用策略
+        # print("传入",curr_main_df,curr_sub_df)
         signal = strategy.analyze_snapshot(symbol, main_lvl, curr_main_df, curr_sub_df)
         
         if signal:

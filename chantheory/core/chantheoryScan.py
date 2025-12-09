@@ -3,24 +3,37 @@ import numpy as np
 from hyperliquidDataMgr import MarketDataManager
 
 class ChanLunStrategy:
-    def __init__(self):
-        self.data_manager = MarketDataManager()
-        
-        # 状态字典
+    def __init__(self,data_manager=None):
+        if data_manager:
+            self.data_manager = data_manager
+        else:
+            self.data_manager = MarketDataManager()
         self.states = {} 
+        self.last_trade_result = {}
+        self.SLOPE_THRESHOLD = 0.35 
+        self.EXPIRATION_BARS = 60
 
-        # --- [修复] 补全缺失的参数定义 ---
-        self.SLOPE_THRESHOLD = 0.35  # 均线斜率阈值 (防止逆势抄底)
-        self.EXPIRATION_BARS = 60    # 信号等待超时周期 (K线根数)
+    # ... (get_state, reset_state 保持不变) ...
+    # 🚨 [新增] 运行结束后，持久化状态
+    def persist_state(self, key):
+        """将单个 key 的状态保存到数据库"""
+        if key in self.states:
+            self.data_manager.save_strategy_state(key, self.states[key])
+
 
     def get_state(self, key):
         if key not in self.states:
-            self.states[key] = {
-                'state': 'NEUTRAL',
-                'last_1b_price': None, 'last_1b_idx': 0,
-                'last_1s_price': None, 'last_1s_idx': 0,
-                'last_pivot_ts': 0
-            }
+            # 🚨 [新增] 尝试从数据库加载旧状态
+            loaded_state = self.data_manager.load_strategy_state(key)
+            if loaded_state:
+                self.states[key] = loaded_state
+            else:
+                self.states[key] = {
+                    'state': 'NEUTRAL',
+                    'last_1b_price': None, 'last_1b_idx': 0,
+                    'last_1s_price': None, 'last_1s_idx': 0,
+                    'last_pivot_ts': 0
+                }
         return self.states[key]
 
     def reset_state(self):
@@ -265,83 +278,125 @@ class ChanLunStrategy:
             'prev_peak_price': prev_peak_price # 返回上个山头的价格，用于比对
         }
 
+
     def analyze_snapshot(self, symbol, main_lvl, df_main, df_sub):
-        """V16.2 终极版: 一买/二买/三买 + V反 + 次级别共振"""
+        """V22.0 回归增强版: 基于 V19 内核，精准修复 3S 追空和 3B 逻辑错乱"""
+        
         if df_main is None or len(df_main) < 100: return None
         
-        # 状态 Key
         st_key = f"{symbol}_{main_lvl}"
         st = self.get_state(st_key)
+        
+        # 基础数据准备
+        curr = df_main.iloc[-1]
+        curr_idx = len(df_main) - 1
+        prev = df_main.iloc[-2]
         
         zz_dev, rsi_panic_buy, vol_mult = self.get_dynamic_config(df_main)
         pivots = self.get_zigzag_pivots(df_main, deviation=zz_dev)
         if len(pivots) < 4: return None
         
-        curr = df_main.iloc[-1]
-        curr_idx = len(df_main) - 1
-        prev = df_main.iloc[-2]
-        
         last_pivot = pivots[-1]      
         confirmed_pivot = pivots[-2] 
-        
         slope = curr['ma60_slope']
         rsi = curr['rsi']
-        
+
+        # 辅助变量：记录交易结果的 Key (用于解决 1S -> 3B 问题)
+        res_key = f"{symbol}_{main_lvl}"
+
         # ==============================================================================
-        # 🟢 买点探测 (Buy Side)
+        # 🛡️ 1. 持仓管理与止损 (Position Management)
         # ==============================================================================
         
-        # 状态维护 (止损/超时检查)
+        # --- 场景 A: 持有多单 (Waiting for 2B) ---
         if st['state'] == 'WAITING_FOR_2B':
-            if curr_idx - st['last_1b_idx'] > self.EXPIRATION_BARS: st['state'] = 'NEUTRAL'
-            elif curr['close'] < st['last_1b_price']: st['state'] = 'NEUTRAL' 
+            # 1. 强制止损
+            if curr['close'] < st['last_1b_price']:
+                st['state'] = 'NEUTRAL'
+                self.last_trade_result[res_key] = {'type': 'STOP_LOSS_LONG', 'idx': curr_idx}
+                return {
+                    "type": "STOP_LOSS", "action": "sell", 
+                    "price": curr['close'], "desc": "⛔ 止损(多单破位)", "stop_loss": 0
+                }
+            # 2. 超时
+            if curr_idx - st['last_1b_idx'] > self.EXPIRATION_BARS: 
+                st['state'] = 'NEUTRAL'
+                return None
+
+        # --- 场景 B: 持有空单 (Waiting for 2S) ---
+        elif st['state'] == 'WAITING_FOR_2S':
+            # 1. 空单止损
+            if curr['close'] > st['last_1s_price']:
+                st['state'] = 'NEUTRAL'
+                
+                # 🚨 记录空单止损，用于后续过滤“幽灵3B”
+                self.last_trade_result[res_key] = {'type': 'STOP_LOSS_SHORT', 'idx': curr_idx}
+                
+                return {
+                    "type": "STOP_LOSS", "action": "buy", 
+                    "price": curr['close'], "desc": "⛔ 止损(空单破位)", "stop_loss": 0
+                }
+            # 2. 超时
+            if curr_idx - st['last_1s_idx'] > self.EXPIRATION_BARS: 
+                st['state'] = 'NEUTRAL'
+                return None
+
+        # ==============================================================================
+        # 🟢 2. 开仓探测 (Open Position) - 仅在空仓时
+        # ==============================================================================
         
         if st['state'] == 'NEUTRAL' or st['state'] == 'WAITING_FOR_1S':
             
             # ------------------------------------------------------------------
-            # 逻辑E: 三类买点 (趋势急涨 - 踏空救星) [新增]
+            # 逻辑 E: 三买 (趋势中继)
             # ------------------------------------------------------------------
-            # 场景: 主升浪中，回踩 MA60 不破，再次起飞
-            if curr['close'] > curr['ma60'] and slope > 0.1: # 均线向上
-                # 必须是回调段 (ZigZag 向下)
-                if last_pivot['type'] == -1:
-                    # 回调不破 MA60 (或者刺破一点点立刻收回)
-                    if curr['low'] > curr['ma60'] * 0.995:
-                        # MACD 回抽零轴: Diff 必须大于 0 (还在水上)
-                        if 0 < curr['diff'] < curr['std'] * 1.5: # 这里的 std 需要你在 calculate_indicators 里算一下，或者简单给个阈值
-                             # 触发: 阳包阴 或 放量上涨
-                             if self.check_trigger(curr, prev, vol_mult, 'buy'):
-                                 return {"type": "3B", "action": "buy", "price": curr['close'], "desc": "三买(趋势中继)", "stop_loss": curr['low']*0.98}
+            if curr['close'] > curr['ma60'] and slope > 0.05: 
+                if last_pivot['type'] == -1: # 底分型
+                    if curr['low'] > curr['ma60'] * 0.995: 
+                        if 0 < curr['diff'] < curr['std'] * 2.0: 
+                             
+                             # 🚨 [修复逻辑 1]: 防止 1S 止损后立即报 3B
+                             # 只有当当前的 ZigZag 低点是在止损发生【之后】形成的，才算有效回调。
+                             # 否则就是用旧结构在追高。
+                             is_valid_3b = True
+                             last_res = self.last_trade_result.get(res_key)
+                             if last_res and last_res.get('type') == 'STOP_LOSS_SHORT':
+                                 if last_pivot['idx'] <= last_res['idx']:
+                                     is_valid_3b = False
+
+                             if is_valid_3b:
+                                 if self.check_trigger(curr, prev, vol_mult, 'buy'):
+                                     st['state'] = 'WAITING_FOR_2B'; st['last_1b_price'] = curr['low']; st['last_1b_idx'] = curr_idx
+                                     return {"type": "3B", "action": "buy", "price": curr['close'], "desc": "三买(趋势中继)", "stop_loss": curr['low']*0.98}
 
             # ------------------------------------------------------------------
-            # 逻辑A: 左侧一买 (恐慌/背驰)
+            # 逻辑 A/B: 一买 (抄底) - 回归 V19 宽松逻辑，找回丢失的买点
             # ------------------------------------------------------------------
             is_left_signal = False
             signal_desc = ""
 
-            # A1. 恐慌底
+            # 1. 恐慌 V 反 (RSI 极低 + 放量)
             if curr['close'] < curr['ma60'] and rsi < rsi_panic_buy:
                 if curr['volume'] > curr['vol_ma5'] * vol_mult:
                     if curr['close'] > curr['open'] or curr['lower_shadow'] > curr['body']*2:
                         is_left_signal = True; signal_desc = "一买(恐慌V反)"
 
-            # A2. 结构背驰 (含次级别共振)
+            # 2. 区间套背驰 (MACD 背驰)
             if not is_left_signal and last_pivot['type'] == -1: 
-                if curr['close'] < curr['ma60'] and rsi < 65:
+                if curr['close'] < curr['ma60'] and rsi < 65: # 只要 RSI 不在高位即可
+                    
                     idx_top_2 = pivots[-2]['idx']
                     idx_top_1 = pivots[-4]['idx'] if len(pivots) > 3 else 0
                     idx_bot_1 = pivots[-3]['idx']
-                    
-                    # 价格创新低
                     if curr['close'] < pivots[-3]['price']: 
                         area_1 = self.calculate_macd_area(df_main, idx_top_1, idx_bot_1)
                         area_2 = self.calculate_macd_area(df_main, idx_top_2, curr_idx)
                         diff_1 = pivots[-3].get('diff', -999); diff_2 = curr['diff']
                         rsi_1 = pivots[-3].get('rsi', 0); rsi_2 = curr['rsi']
                         
-                        # 背驰判断
+                        # 经典背驰条件
                         if (area_2 < area_1 or diff_2 > diff_1 or rsi_2 > rsi_1): 
-                            if self.check_sub_structure(df_sub, mode='buy'): # 次级别验证
+                            if self.check_sub_structure(df_sub, mode='buy'): 
                                 if self.check_trigger(curr, prev, vol_mult, 'buy'):
                                     is_left_signal = True; signal_desc = "一买(区间套背驰)"
 
@@ -350,154 +405,73 @@ class ChanLunStrategy:
                 return {"type": "1B", "action": "buy", "price": curr['close'], "desc": signal_desc, "stop_loss": curr['low']*0.98}
 
             # ------------------------------------------------------------------
-            # 逻辑B: 右侧V反 (强势收复)
+            # 逻辑 H: 一卖 (逃顶)
             # ------------------------------------------------------------------
-            if curr['close'] < curr['ma60'] or rsi < 50:
-                if curr['close'] > curr['ma5'] and curr['close'] > curr['open']:
-                    if last_pivot['type'] == -1:
-                        if (curr['close'] > prev['open'] or curr['volume'] > curr['vol_ma5']*1.2) and curr['rsi'] > prev['rsi']:
-                             st['state'] = 'WAITING_FOR_2B'; st['last_1b_price'] = curr['low']; st['last_1b_idx'] = curr_idx
-                             return {"type": "1B", "action": "buy", "price": curr['close'], "desc": "一买(右侧V反)", "stop_loss": curr['low']*0.99}
-
-        # ------------------------------------------------------------------
-        # 逻辑C: 二买 (回踩确认)
-        # ------------------------------------------------------------------
-        elif st['state'] == 'WAITING_FOR_2B':
-            if curr['close'] < st['last_1b_price']: st['state'] = 'NEUTRAL'; return None
-            if slope < -self.SLOPE_THRESHOLD: return None
-            
-            if confirmed_pivot['type'] == -1 and confirmed_pivot['ts'] != st['last_pivot_ts']:
-                if confirmed_pivot['price'] > st['last_1b_price']: # 底抬高
-                     if curr['close'] > confirmed_pivot['price']:
-                        st['last_pivot_ts'] = confirmed_pivot['ts']
-                        return {"type": "2B", "action": "buy", "price": curr['close'], "desc": "二买(回踩确认)", "stop_loss": confirmed_pivot['price']}
-
-        # ==============================================================================
-        # 🔴 卖点探测 (Sell Side)
-        # ==============================================================================
-        
-        if st['state'] == 'WAITING_FOR_2S':
-            if curr_idx - st['last_1s_idx'] > self.EXPIRATION_BARS: st['state'] = 'NEUTRAL'
-        
-        if st['state'] == 'NEUTRAL' or st['state'] == 'WAITING_FOR_2B':
-            
-            # ------------------------------------------------------------------
-            # 🚨 逻辑H: 趋势高潮一卖 (Climax Top / V16.8 强趋势保护版)
-            # ------------------------------------------------------------------
-            # 解决痛点: 在主升浪（强趋势）中途，因指标滞后导致的"假背驰"误报。
-            # 方案: 引入 slope (均线斜率) 过滤。
-            #      1. 如果斜率极陡 (slope > 0.6)，屏蔽普通背驰，只看严重高潮。
-            #      2. 如果斜率平缓，恢复普通背驰检测。
-            
             if curr['close'] > curr['ma60']:
-                if rsi > 65: 
-                    
-                    # 1. 价格形态判定 (High Stalling)
-                    # 必须要有滞涨表现：收阴、长上影、或假突破
+                if rsi > 60: 
                     is_stalling = False
                     if curr['high'] > prev['high']: 
-                        if curr['close'] < curr['open'] or \
-                           curr['upper_shadow'] > curr['body'] * 1.5 or \
-                           curr['close'] < prev['high']: # 假突破
+                        if curr['close'] < curr['open'] or curr['upper_shadow'] > curr['body'] * 1.5 or curr['close'] < prev['high']: 
                             is_stalling = True
-                    
-                    # 针对十字星/小星线 (波动率极低)
-                    if abs(curr['close'] - curr['open']) / curr['close'] < 0.003: 
-                        is_stalling = True
+                    if abs(curr['close'] - curr['open']) / curr['close'] < 0.003: is_stalling = True
 
                     if is_stalling:
                         macd_stats = self.get_macd_history(df_main, curr_idx)
                         curr_bar = abs(curr['macd'])
                         prev_bar = abs(prev['macd'])
-                        
-                        # 计算背驰比率 (当前 / 前高)
                         div_ratio = 1.0
-                        if macd_stats['prev_peak'] > 0:
-                            div_ratio = macd_stats['curr_peak'] / macd_stats['prev_peak']
-                        
-                        # 基础条件: 价格必须创新高 (相对于上一个波峰时刻)
-                        # 如果连价格都没创新高，那叫二卖，不叫背驰
+                        if macd_stats['prev_peak'] > 0: div_ratio = macd_stats['curr_peak'] / macd_stats['prev_peak']
                         price_divergence = curr['high'] > macd_stats['prev_peak_price']
                         
-                        # --- [趋势强度保护锁] ---
-                        # slope 是 MA60 的斜率，通常在 0 ~ 2 之间。
-                        # > 0.5 意味着非常陡峭的主升浪。
                         is_strong_trend = slope > 0.6 
-                        
-                        # 判定A: 严重背驰 (Severe) -> 12.17 这种大顶
-                        # 动能直接腰斩 (< 0.6)。这种情况下，不管趋势多强，都得跑。
-                        # 不需要等待缩头 (is_shrinking)，形态一坏就跑。
                         is_severe = div_ratio < 0.6 and price_divergence
-                        
-                        # 判定B: 普通背驰 (Standard) -> 容易误报的区域
-                        # 动能稍微弱一点 (0.6 ~ 0.85)。
-                        # 🛡️ 保护逻辑: 如果是强趋势 (is_strong_trend)，直接忽略普通背驰！
-                        # 只有当趋势没那么强，且柱子确实在缩短时，才允许卖出。
                         is_shrinking = curr_bar < prev_bar
                         is_standard = False
-                        if not is_strong_trend: # <--- 只有趋势不强时才看这个
+                        if not is_strong_trend:
                             if div_ratio < 0.85 and price_divergence and is_shrinking:
                                 is_standard = True
-                        
-                        # 判定C: 疯牛内部衰竭 (RSI Extremes)
-                        # 针对 RSI 极高的情况，只要缩头就跑
                         is_internal = False
-                        if rsi > 82: # 门槛提得很高
-                             if curr_bar < macd_stats['curr_peak'] * 0.7:
-                                 is_internal = True
+                        if rsi > 82 and curr_bar < macd_stats['curr_peak'] * 0.8: is_internal = True
 
                         if is_severe or is_standard or is_internal:
-                             if curr['macd'] > 0: # 必须红柱
-                                 # 调试描述
-                                 debug_msg = f"(r={div_ratio:.2f}, s={slope:.2f})"
-                                 if is_severe: desc = f"一卖(严重背驰){debug_msg}"
-                                 elif is_standard: desc = f"一卖(背驰确认){debug_msg}"
-                                 else: desc = f"一卖(高潮){debug_msg}"
-                                 
+                             if curr['macd'] > 0: 
+                                 desc = f"一卖(背驰 r={div_ratio:.2f})"
+                                 # 允许反手做空，更新状态
                                  st['state'] = 'WAITING_FOR_2S'; st['last_1s_price'] = curr['high']; st['last_1s_idx'] = curr_idx
                                  return {"type": "1S", "action": "sell", "price": curr['close'], "desc": desc, "stop_loss": curr['high']*1.01}
 
-            # ------------------------------------------------------------------            
             # ------------------------------------------------------------------
-            # 逻辑F: 三类卖点 (主跌浪加速) [新增]
+            # 逻辑 F: 三卖 (下跌中继)
             # ------------------------------------------------------------------
-            if curr['close'] < curr['ma60'] and slope < -0.1:
-                if last_pivot['type'] == 1: # 反弹段
-                    if curr['high'] < curr['ma60'] * 1.005: # 反抽不过 MA60
-                        if curr['diff'] < 0 and curr['diff'] > -curr['std'] * 1.5: # 水下回抽
+            # 🚨 [修复逻辑 2]: 解决“3S 追空地板”问题
+            # 必须增加“超卖保护”：如果 RSI 已经很低，或者离 MA60 太远，禁止三卖。
+            
+            if st['state'] == 'NEUTRAL':
+                if curr['close'] < curr['ma60'] and slope < -0.1:
+                    if last_pivot['type'] == 1 and curr['high'] < curr['ma60'] * 1.005:
+                        
+                        # 核心过滤：
+                        # 1. RSI 不能太低 (防止在底部追空)
+                        # 2. 乖离率不能太大 (防止在远离均线处杀跌)
+                        not_oversold = rsi > 35 
+                        not_too_far = curr['close'] > curr['ma60'] * 0.95 
+                        
+                        if curr['diff'] < 0 and not_oversold and not_too_far:
                              if self.check_trigger(curr, prev, vol_mult, 'sell'):
                                  return {"type": "3S", "action": "sell", "price": curr['close'], "desc": "三卖(下跌中继)", "stop_loss": curr['high']*1.02}
 
-            # ------------------------------------------------------------------
-            # 逻辑D: 一卖 (背驰)
-            # ------------------------------------------------------------------
-            if last_pivot['type'] == 1: 
-                if curr['close'] > curr['ma60'] and rsi > 40:
-                    idx_bot_2 = pivots[-2]['idx']
-                    idx_bot_1 = pivots[-4]['idx'] if len(pivots) > 3 else 0
-                    idx_top_1 = pivots[-3]['idx']
-                    
-                    if curr['close'] > pivots[-3]['price']: # 创新高
-                        area_1 = self.calculate_macd_area(df_main, idx_bot_1, idx_top_1)
-                        area_2 = self.calculate_macd_area(df_main, idx_bot_2, curr_idx)
-                        diff_1 = pivots[-3].get('diff', 999); diff_2 = curr['diff']
-                        rsi_1 = pivots[-3].get('rsi', 100); rsi_2 = curr['rsi']
-                        
-                        if (area_2 < area_1 or diff_2 < diff_1 or rsi_2 < rsi_1): 
-                            if self.check_sub_structure(df_sub, mode='sell'): # 次级别验证
-                                if self.check_trigger(curr, prev, vol_mult, 'sell'):
-                                    st['state'] = 'WAITING_FOR_2S'; st['last_1s_price'] = curr['high']; st['last_1s_idx'] = curr_idx
-                                    return {"type": "1S", "action": "sell", "price": curr['close'], "desc": "一卖(区间套背驰)", "stop_loss": curr['high']*1.01}
-
-        # ------------------------------------------------------------------
-        # 逻辑G: 二卖 (反抽不过)
-        # ------------------------------------------------------------------
+        # 二买/二卖逻辑 (保持不变)
+        elif st['state'] == 'WAITING_FOR_2B':
+             if confirmed_pivot['type'] == -1 and confirmed_pivot['ts'] != st['last_pivot_ts']:
+                if confirmed_pivot['price'] > st['last_1b_price']: 
+                     if curr['close'] > confirmed_pivot['price']:
+                        st['last_pivot_ts'] = confirmed_pivot['ts']
+                        return {"type": "2B", "action": "buy", "price": curr['close'], "desc": "二买(回踩确认)", "stop_loss": confirmed_pivot['price']}
+        
         elif st['state'] == 'WAITING_FOR_2S':
-            if curr['close'] > st['last_1s_price']: st['state'] = 'NEUTRAL'; return None
             if slope > self.SLOPE_THRESHOLD: return None
-
             if confirmed_pivot['type'] == 1 and confirmed_pivot['ts'] != st['last_pivot_ts']:
-                if confirmed_pivot['price'] < st['last_1s_price']: # 顶降低
+                if confirmed_pivot['price'] < st['last_1s_price']: 
                     if curr['close'] < confirmed_pivot['price']:
                         st['last_pivot_ts'] = confirmed_pivot['ts']
                         return {"type": "2S", "action": "sell", "price": curr['close'], "desc": "二卖(反抽不过)", "stop_loss": confirmed_pivot['price']}
@@ -515,8 +489,8 @@ class ChanLunStrategy:
     def detect_signals(self, symbol, main_lvl='30m', sub_lvl='5m'):
         """入口函数"""
         ratio = self.get_time_ratio(main_lvl, sub_lvl)
-        main_limit = 600
-        sub_limit = main_limit * ratio + 200
+        main_limit = 1000
+        sub_limit = main_limit * ratio + 500
         sub_limit = min(sub_limit, 4800)
 
         self.data_manager.update_data(symbol, main_lvl)
@@ -529,6 +503,11 @@ class ChanLunStrategy:
         df_sub = self.calculate_indicators(df_sub)
         
         signal = self.analyze_snapshot(symbol,main_lvl,df_main, df_sub)
+
+        # 🚨 [新增] 运行结束，保存状态
+        st_key = f"{symbol}_{main_lvl}"        
+        # 🚨 [新增] 运行结束，持久化状态
+        self.data_manager.save_strategy_state(st_key, self.states[st_key])        
         
         if signal:
             return self.print_signal(symbol, signal['desc'], main_lvl, sub_lvl, signal['price'], signal['stop_loss'], is_buy=(signal['action']=='buy'))

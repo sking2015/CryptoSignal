@@ -102,29 +102,31 @@ class MarketDataManager:
             payload["req"]["endTime"] = int(end_time)
 
         try:
-            response = requests.post(self.base_url, json=payload, headers=headers, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                formatted_data = []
-                for k in data:
-                    formatted_data.append((
-                        k['t'], 
-                        float(k['o']), 
-                        float(k['h']), 
-                        float(k['l']), 
-                        float(k['c']), 
-                        float(k['v'])
-                    ))
-                return formatted_data
-            else:
-                print(f"API Error {response.status_code}: {response.text}")
+            # 增加超时时间到 15s
+            response = requests.post(self.base_url, json=payload, headers=headers, timeout=15)
+            
+            if response.status_code != 200:
+                # print(f"🚨 API请求失败: {symbol} {interval} | 状态: {response.status_code}")
                 return []
+            
+            data = response.json()
+            formatted_data = []
+            for k in data:
+                formatted_data.append((
+                    k['t'], 
+                    float(k['o']), 
+                    float(k['h']), 
+                    float(k['l']), 
+                    float(k['c']), 
+                    float(k['v'])
+                ))
+            return formatted_data
         except Exception as e:
-            print(f"Request Failed: {e}")
+            # print(f"Request Failed: {e}")
             return []
 
     def save_data(self, symbol, interval, data_list):
-        """批量保存数据"""
+        """批量保存数据 (INSERT OR REPLACE 确保能更新最新K线)"""
         if not data_list: return
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -148,62 +150,58 @@ class MarketDataManager:
         return row[0] if row and row[0] else None
 
     # =========================================================
-    # 🚀 V6.0 修复版 Update Data - 支持强制回溯
+    # 🚀 V40.0 核心修复：实时刷新最后一根K线 (Live Candle Refresh)
     # =========================================================
     def update_data(self, symbol, interval, force_backfill=False):
         """
-        更新数据：
-        1. force_backfill=True 或首次运行：触发历史数据回溯补齐 (TARGET_BAR_COUNT 根)
-        2. 始终进行增量更新 (保持最新)
+        更新数据逻辑升级：
+        1. 历史回溯：如果数据不足，抓取历史。
+        2. 实时刷新：总是从数据库中【最后一条记录的时间】开始抓取，
+           确保正在进行中的K线（未走完的）能实时更新其 Close/High/Low 价格。
         """
         max_ts = self.get_max_timestamp(symbol, interval)
         current_ts = int(time.time() * 1000)
         
-        TARGET_BAR_COUNT = 1500 # 目标抓取历史K线数量
+        TARGET_BAR_COUNT = 1500 
         interval_ms = self.get_interval_ms(interval)
         
         is_initial_run = (max_ts is None)
         
-        # 1. 历史数据回溯补齐逻辑 (解决数据不足问题)
+        # 1. 历史补齐 (保持不变)
         if is_initial_run or force_backfill:
-            print(f"✨ 触发历史数据回溯补齐/刷新 {symbol} {interval}...")
-            
-            # 计算需要回溯的起始时间点（1500根K线前）
+            # print(f"✨ 触发历史补齐 {symbol} {interval}...")
             start_time = current_ts - (TARGET_BAR_COUNT * interval_ms)
-            
             new_data = self.fetch_from_api(symbol, interval, start_time)
             if new_data:
                 self.save_data(symbol, interval, new_data)
-                print(f"✅ 历史数据补齐完成: {symbol} {interval} | 抓取 {len(new_data)} 条")
-            else:
-                print(f"⚠️ 历史数据补齐失败: {symbol} {interval} API未返回数据")
-                
-        # 2. 增量更新 (保持最新)
-        # 重新获取最大时间戳，确保包含了刚刚的回溯数据
-        max_ts_after_backfill = self.get_max_timestamp(symbol, interval) 
+            return # 补齐后直接结束，因为补齐的数据肯定包含了最新的
+
+        # 2. 增量更新 + 实时刷新 (核心修改)
+        # 重新获取最大时间戳
+        max_ts_after_backfill = self.get_max_timestamp(symbol, interval)
         
         if max_ts_after_backfill is not None:
-            # 检查最新数据是否过期 (允许 0.5 个周期的延迟，因为K线可能未走完)
-            if current_ts - max_ts_after_backfill > interval_ms * 0.5: 
-                start_time = max_ts_after_backfill + 1 # 从下一毫秒开始抓
-                
-                print(f"🔄 增量更新 {symbol} {interval}...")
-                new_data = self.fetch_from_api(symbol, interval, start_time)
-                
-                if new_data:
-                    self.save_data(symbol, interval, new_data)
-                    print(f"✅ 更新成功: {symbol} {interval} +{len(new_data)} 条")
-                else:
-                    pass # 没有新数据是正常情况
+            # 🚨 关键修改点 🚨
+            # 旧逻辑: start_time = max_ts + 1 (导致跳过已存在的最后一根)
+            # 新逻辑: start_time = max_ts (重抓最后一根，覆盖更新它)
+            
+            start_time = max_ts_after_backfill
+            
+            # 移除所有时间间隔判断 (if current - max > interval)，
+            # 只要被调用，就无条件去确认一下最新K线的状态。
+            
+            new_data = self.fetch_from_api(symbol, interval, start_time)
+            
+            if new_data:
+                # save_data 使用的是 INSERT OR REPLACE
+                # 所以数据库中旧的、未走完的 max_ts 记录会被新的数据覆盖
+                self.save_data(symbol, interval, new_data)
+                # print(f"✅ 刷新成功: {symbol} {interval} (Covering {pd.to_datetime(start_time, unit='ms')})")
 
-    # =========================================================
-    # 🔎 V6.0 修复版 Load Data - 自动触发补齐
-    # =========================================================
     def load_data_for_analysis(self, symbol, interval, limit=1000):
         """读取数据，并在数据不足时自动触发历史补齐"""
         conn = sqlite3.connect(self.db_path)
         
-        # 1. 尝试查询数据
         query = f"""
             SELECT * FROM (
                 SELECT timestamp, open, high, low, close, volume 
@@ -217,24 +215,18 @@ class MarketDataManager:
             df = pd.read_sql_query(query, conn)
             conn.close()
             
-            # 2. 检查数据量是否满足需求
-            if len(df) < limit:
-                 # 只有当数据量不足，且请求的 K 线数较多时才触发补齐
-                if len(df) > 0 and limit > 100: 
-                    print(f"⚠️ 数据量 ({len(df)}/{limit}) 不足，触发历史补齐...")
-                    # 🚨 关键：自动调用 update_data 强制回溯
-                    self.update_data(symbol, interval, force_backfill=True)
-                    
-                    # 重新加载数据，只重试一次
-                    conn = sqlite3.connect(self.db_path)
-                    df = pd.read_sql_query(query, conn)
-                    conn.close()
-                    
-                    # 如果补齐后还是不够 100 根，则认为数据源有问题
-                    if len(df) < 100: 
-                         return None
+            # 检查数据量
+            if len(df) < limit and len(df) > 0 and limit > 100:
+                # print(f"⚠️ 数据量不足，触发补齐...")
+                self.update_data(symbol, interval, force_backfill=True)
+                
+                # 重试一次
+                conn = sqlite3.connect(self.db_path)
+                df = pd.read_sql_query(query, conn)
+                conn.close()
+                
+                if len(df) < 100: return None
             
-            # 3. 数据整理与返回
             if not df.empty:
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 cols = ['open', 'high', 'low', 'close', 'volume']
@@ -242,6 +234,5 @@ class MarketDataManager:
                 return df
             return None
         except Exception as e:
-            print(f"Load Data Error: {e}")
             conn.close()
             return None

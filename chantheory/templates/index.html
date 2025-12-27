@@ -81,7 +81,7 @@
             for (let i = 0; i < ohlcData.length; i++) {
                 let close = ohlcData[i][1];
                 ema = (close - ema) * k + ema;
-                result.push(parseFloat(ema.toFixed(2)));
+                result.push(parseFloat(ema.toFixed(6)));
             }
             return result;
         }
@@ -142,9 +142,11 @@
                         let html = `<div style="border-bottom:1px solid #555;padding-bottom:3px;">${params[0].name}</div>`;
                         params.forEach(p => {
                             if (p.seriesName === 'KLine') {
-                                html += `O:${p.data[1]} H:${p.data[4]} L:${p.data[3]} C:${p.data[2]}<br/>`;
+                                // 修正 K 线显示顺序：开(1) 收(2) 低(3) 高(4)
+                                html += `开:${p.data[1]} <b>收:${p.data[2]}</b> 低:${p.data[3]} 高:${p.data[4]}<br/>`;
                             } else if (p.value !== undefined) {
-                                html += `<span style="color:${p.color}">●</span> ${p.seriesName}: ${p.value}<br/>`;
+                                // EMA 显示保留 4-6 位小数
+                                html += `<span style="color:${p.color}">●</span> ${p.seriesName}: ${parseFloat(p.value).toFixed(4)}<br/>`;
                             }
                         });
                         return html;

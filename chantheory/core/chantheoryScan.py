@@ -224,7 +224,7 @@ class ChanLunStrategy:
                 "type": "EMA_Revert_S",   # 信号类型标记
                 "action": "sell", 
                 "price": current_price, 
-                "desc": f"乖离过大:价超EMA7 {int(threshold*100)}% (看跌)", 
+                "desc": f"乖离过大:价超EMA7 {float(threshold*100)}% (看跌)", 
                 "stop_loss": stop_loss_price
             }
 
@@ -382,6 +382,6 @@ class ChanLunStrategy:
     def print_signal(self, symbol, type_name, main, sub, price, stop_loss, is_buy=True):
         emoji = "🚀" if is_buy else "🌊" 
         action = "做多" if is_buy else "做空"
-        mess = f"{emoji} [缠论-{action}] {symbol} ({main}) | {type_name}\n   现价: {price} | 止损: {stop_loss:.4f}\n"
+        mess = f"{emoji} [均线乖离-{action}] {symbol} ({main}) | {type_name}\n   现价: {price} | 止损: {stop_loss:.4f}\n"
         print(mess)
         return mess

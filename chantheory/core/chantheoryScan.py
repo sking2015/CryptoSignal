@@ -174,6 +174,84 @@ class ChanLunStrategy:
         df['vol_ma'] = df['volume'].rolling(window=20).mean()
 
         return df
+    
+
+    def analyzeEMA_snapshot(self, symbol, main_lvl, df_main, df_sub):
+        """
+        基于EMA均线乖离率的简单策略
+        逻辑：
+        1. 卖出：多头排列(7,25 > 99,255) 且 价格 > EMA7 * 1.2 (乖离20%)
+        2. 买入：空头排列(7,25 < 99,255) 且 价格 < EMA7 * 0.8 (乖离20%)
+        """
+        # 1. 基础数据检查
+        # 只要数据够计算 EMA255 即可
+        if df_main is None or len(df_main) < 260: 
+            return None
+        
+        # 2. 计算均线 (使用Pandas内置ewm函数，无需额外依赖)
+        # 注意：这里假设 df_main 已经按时间排序
+        close_series = df_main['close']
+        
+        # 计算四条均线的最新值 (iloc[-1])
+        ema7   = close_series.ewm(span=7, adjust=False).mean().iloc[-1]
+        ema25  = close_series.ewm(span=25, adjust=False).mean().iloc[-1]
+        ema99  = close_series.ewm(span=99, adjust=False).mean().iloc[-1]
+        ema255 = close_series.ewm(span=255, adjust=False).mean().iloc[-1]
+        
+        current_price = close_series.iloc[-1]
+        
+        # 设定乖离阈值 (用户设定为 20%)
+        threshold = 0.005
+        
+        # ========================================================
+        # 🔴 卖出信号逻辑 (趋势向上 + 价格暴涨远离均线)
+        # ========================================================
+        
+        # 1. 均线多头排列验证：短期(7, 25) 必须在 长期(99, 255) 之上
+        is_bull_trend = (ema7 > ema99 and ema7 > ema255) and \
+                        (ema25 > ema99 and ema25 > ema255)
+        
+        # 2. 乖离率验证：价格比 EMA7 高出 20%
+        # 公式：Price > EMA7 * (1 + 0.2)
+        is_overbought = current_price > (ema7 * (1 + threshold))
+
+        print("当前价格",current_price)
+        print("EM7倍离值",ema7 * (1 + threshold))
+        
+        if is_bull_trend and is_overbought:
+            stop_loss_price = current_price * 1.05 # 简单的百分比止损，或根据你的需求调整
+            return {
+                "type": "EMA_Revert_S",   # 信号类型标记
+                "action": "sell", 
+                "price": current_price, 
+                "desc": f"乖离过大:价超EMA7 {int(threshold*100)}% (看跌)", 
+                "stop_loss": stop_loss_price
+            }
+
+        # ========================================================
+        # 🟢 买入信号逻辑 (趋势向下 + 价格暴跌远离均线)
+        # ========================================================
+        
+        # 1. 均线空头排列验证：短期(7, 25) 必须在 长期(99, 255) 之下
+        is_bear_trend = (ema7 < ema99 and ema7 < ema255) and \
+                        (ema25 < ema99 and ema25 < ema255)
+        
+        # 2. 乖离率验证：价格比 EMA7 低 20%
+        # 公式：Price < EMA7 * (1 - 0.2)
+        is_oversold = current_price < (ema7 * (1 - threshold))
+        
+        if is_bear_trend and is_oversold:
+            stop_loss_price = current_price * 0.95 # 简单的百分比止损
+            return {
+                "type": "EMA_Revert_B",   # 信号类型标记
+                "action": "buy", 
+                "price": current_price, 
+                "desc": f"乖离过大:价低EMA7 {int(threshold*100)}% (看涨)", 
+                "stop_loss": stop_loss_price
+            }
+
+        # 无信号
+        return None    
 
     # ---------------------------------------------------------
     # 5. 核心分析逻辑 V39.0 (逻辑防火墙版)
@@ -291,7 +369,8 @@ class ChanLunStrategy:
             self.data_manager.update_data(symbol, main_lvl)
             df_main = self.data_manager.load_data_for_analysis(symbol, main_lvl, limit=1000)
             df_main = self.calculate_indicators(df_main)
-            signal = self.analyze_snapshot(symbol, main_lvl, df_main, None)
+            # signal = self.analyze_snapshot(symbol, main_lvl, df_main, None)
+            signal = self.analyzeEMA_snapshot(symbol, main_lvl, df_main,None)
             
             if signal:
                 return self.print_signal(symbol, signal['desc'], main_lvl, sub_lvl, 

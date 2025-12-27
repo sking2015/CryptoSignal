@@ -106,7 +106,7 @@ def run_backtest_endpoint():
         
         # 调用策略
         # print("传入",curr_main_df,curr_sub_df)
-        signal = strategy.analyze_snapshot(symbol, main_lvl, curr_main_df, curr_sub_df)
+        signal = strategy.analyzeEMA_snapshot(symbol, main_lvl, curr_main_df, curr_sub_df)
         
         if signal:
             sig_data = {

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>缠论真实回测可视化</title>
+    <title>均线乖离回测可视化</title>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <style>
         body { margin: 0; padding: 0; font-family: 'Segoe UI', Roboto, sans-serif; background-color: #161616; color: #ccc; }
@@ -26,17 +26,12 @@
             outline: none;
         }
         button:hover { background-color: #444; }
-        input:focus, select:focus { border-color: #007acc; }
         .btn-green { background-color: #2da44e; border: none; color: #fff; font-weight: bold; }
-        .btn-green:hover { background-color: #2c974b; }
-        
         #chart-container { width: 100%; height: 92vh; }
-        
         .loading {
             position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
             font-size: 16px; display: none; color: white; background: rgba(0,0,0,0.85);
             padding: 25px 50px; border-radius: 10px; z-index: 999; text-align: center;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
         }
     </style>
 </head>
@@ -50,23 +45,17 @@
             <option value="SOL">SOL</option>
             <option value="XRP">XRP</option>
             <option value="DOGE">DOGE</option>
-            <option value="BNB">BNB</option>
+            <option value="BNB">BNB</option>            
         </select>
 
-        <label>主级别:</label>
+        <label>级别:</label>
         <select id="main_lvl">
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
             <option value="30m">30m</option>
             <option value="1h" selected>1h</option>
             <option value="4h">4h</option>
             <option value="1d">1d</option>
-        </select>
-
-        <label>次级别:</label>
-        <select id="sub_lvl">
-            <option value="5m">5m</option>
-            <option value="15m" selected>15m</option>
-            <option value="30m">30m</option>
-            <option value="4h">4h</option>
         </select>
 
         <label>数量:</label>
@@ -77,23 +66,29 @@
     </div>
 
     <div id="chart-container"></div>
-    <div id="loading" class="loading">
-        <div>🚀 正在进行回测运算...</div>
-        <div style="font-size:12px; color:#aaa; margin-top:8px;">(逐根K线模拟扫描中，请稍候)</div>
-    </div>
+    <div id="loading" class="loading">🚀 正在进行回测运算...</div>
 
     <script>
         var myChart = echarts.init(document.getElementById('chart-container'));
-        
         window.addEventListener('resize', () => myChart.resize());
 
-        // 页面加载时自动运行一次
-        // runBacktest(); 
+        // EMA 计算辅助函数 (适配 ECharts [open, close, low, high] 格式)
+        function calculateEMA(ohlcData, count) {
+            let result = [];
+            if (!ohlcData || ohlcData.length === 0) return result;
+            let k = 2 / (count + 1);
+            let ema = ohlcData[0][1]; // 初始 EMA 取第一根 K 线的收盘价
+            for (let i = 0; i < ohlcData.length; i++) {
+                let close = ohlcData[i][1];
+                ema = (close - ema) * k + ema;
+                result.push(parseFloat(ema.toFixed(2)));
+            }
+            return result;
+        }
 
         function runBacktest() {
             const symbol = document.getElementById('symbol').value;
             const main_lvl = document.getElementById('main_lvl').value;
-            const sub_lvl = document.getElementById('sub_lvl').value;
             const limit = document.getElementById('limit').value;
             const loading = document.getElementById('loading');
             const statusSpan = document.getElementById('status');
@@ -101,212 +96,80 @@
             loading.style.display = 'block';
             statusSpan.innerText = `正在回测 ${symbol}...`;
 
-            fetch(`/run_backtest?symbol=${symbol}&main_lvl=${main_lvl}&sub_lvl=${sub_lvl}&limit=${limit}`)
+            fetch(`/run_backtest?symbol=${symbol}&main_lvl=${main_lvl}&sub_lvl=15m&limit=${limit}`)
                 .then(res => res.json())
                 .then(res => {
                     loading.style.display = 'none';
                     if (res.status === 'success') {
-                        const d = res.data;
-                        statusSpan.innerText = `回测完成: ${symbol} ${main_lvl} (买点:${d.buys.length} 卖点:${d.sells.length})`;
-                        renderChart(d, symbol, main_lvl);
-                    } else {
-                        statusSpan.innerText = '错误: ' + res.message;
-                        alert(res.message);
+                        statusSpan.innerText = `回测完成: ${symbol} (买:${res.data.buys.length} 卖:${res.data.sells.length})`;
+                        renderChart(res.data, symbol, main_lvl);
                     }
-                })
-                .catch(err => {
-                    loading.style.display = 'none';
-                    statusSpan.innerText = '连接失败';
-                    console.error(err);
-                    alert('连接失败，请检查 Python 服务是否启动');
                 });
         }
 
         function renderChart(data, symbol, interval) {
             const dates = data.dates;
-            
-            // --- 关键修改：修复买卖点标签显示 ---
-            // 后端数据格式: [Time, Price, Type, Desc]
-            // ECharts markPoint 需要 name 属性来显示 label
-            
+            const ohlc = data.ohlc;
+
+            // 计算四条 EMA
+            const ema7 = calculateEMA(ohlc, 7);
+            const ema25 = calculateEMA(ohlc, 25);
+            const ema99 = calculateEMA(ohlc, 99);
+            const ema255 = calculateEMA(ohlc, 255);
+
             const markPoints = [];
             data.buys.forEach(b => {
                 markPoints.push({
-                    coord: [b[0], b[1]], 
-                    name: b[2], // 将 Type (如 1B) 放入 name
-                    value: b[1], 
-                    itemStyle: { color: '#2ecc71' }, 
-                    symbol: 'arrow', symbolRotate: 0, symbolOffset: [0, 10], symbolSize: 12,
-                    label: { 
-                        show: true, position: 'bottom', 
-                        formatter: '{b}', // {b} 代表 name，即显示 1B/2B/3B
-                        fontWeight: 'bold', color: '#2ecc71', fontSize: 11 
-                    },
-                    tooltip: { formatter: `时间: ${b[0]}<br>类型: ${b[2]}<br>说明: ${b[3]}` }
+                    coord: [b[0], b[1]], name: b[2], value: b[1],
+                    itemStyle: { color: '#2ecc71' }, symbol: 'arrow', symbolSize: 12,symbolOffset: [0, 10],
+                    label: { show: true, position: 'bottom', formatter: '{b}', fontWeight: 'bold' }
                 });
             });
             data.sells.forEach(s => {
                 markPoints.push({
-                    coord: [s[0], s[1]], 
-                    name: s[2], // 将 Type (如 2S) 放入 name
-                    value: s[1],
-                    itemStyle: { color: '#e74c3c' }, 
-                    symbol: 'arrow', symbolRotate: 180, symbolOffset: [0, -10], symbolSize: 12,
-                    label: { 
-                        show: true, position: 'top', 
-                        formatter: '{b}', // 显示 1S/2S
-                        fontWeight: 'bold', color: '#e74c3c', fontSize: 11
-                    },
-                    tooltip: { formatter: `时间: ${s[0]}<br>类型: ${s[2]}<br>说明: ${s[3]}` }
+                    coord: [s[0], s[1]], name: s[2], value: s[1],
+                    itemStyle: { color: '#e74c3c' }, symbol: 'arrow', symbolSize: 12,symbolRotate: 180, symbolOffset: [0, -10],
+                    label: { show: true, position: 'top', formatter: '{b}', fontWeight: 'bold' }
                 });
-            });
-
-            // 涨跌颜色判断
-            const volColors = data.ohlc.map((item) => {
-                return item[1] >= item[0] ? '#20b2aa' : '#ff6347';
             });
 
             const option = {
                 backgroundColor: '#161616',
-                animation: false,
-                title: { text: `缠论策略回测: ${symbol} - ${interval}`, left: 'center', textStyle: { color: '#eee', fontSize: 16 } },
-                
-                // --- 关键修改：专业级 Tooltip ---
-                tooltip: { 
-                    trigger: 'axis', 
-                    axisPointer: { type: 'cross', label: { backgroundColor: '#6a7985' } }, 
-                    backgroundColor: 'rgba(30,30,30,0.9)', 
-                    borderColor: '#444',
-                    borderWidth: 1,
-                    textStyle: { color: '#eee', fontSize: 13 },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' },
                     formatter: function (params) {
-                        if (!params || params.length === 0) return '';
-                        
-                        let date = params[0].name;
-                        let html = `<div style="font-weight:bold; margin-bottom:5px; border-bottom:1px solid #555; padding-bottom:3px;">${date}</div>`;
-                        
-                        // 寻找对应的数据
-                        let kline = params.find(p => p.seriesName === 'KLine');
-                        let ma60 = params.find(p => p.seriesName === 'MA60');
-                        let vol = params.find(p => p.seriesName === 'Volume');
-                        let rsi = params.find(p => p.seriesName === 'RSI');
-                        let macdBar = params.find(p => p.seriesName === 'MACD');
-                        let dif = params.find(p => p.seriesName === 'DIF');
-                        let dea = params.find(p => p.seriesName === 'DEA');
-
-                        if (kline) {
-                            // ECharts Candlestick data index: [index, open, close, low, high]
-                            let o = kline.data[1], c = kline.data[2], l = kline.data[3], h = kline.data[4];
-                            let clr = c >= o ? '#20b2aa' : '#ff6347'; // 涨绿跌红
-                            html += `<div style="color:${clr}">● Open: ${o}</div>`;
-                            html += `<div style="color:${clr}">● High: ${h}</div>`;
-                            html += `<div style="color:${clr}">● Low:  ${l}</div>`;
-                            html += `<div style="color:${clr}">● Close:${c}</div>`;
-                        }
-                        
-                        if (ma60) html += `<div style="color:#f39c12">MA60: ${ma60.value.toFixed(2)}</div>`;
-                        if (vol) html += `<div style="color:#aaa">Vol: ${Math.round(vol.value)}</div>`;
-                        if (rsi) html += `<div style="color:#d35400">RSI: ${rsi.value.toFixed(2)}</div>`;
-                        
-                        if (macdBar) {
-                            let mClr = macdBar.value > 0 ? '#ff6347' : '#20b2aa';
-                            html += `<br><div>MACD: <span style="color:${mClr}">${macdBar.value.toFixed(4)}</span></div>`;
-                            if (dif) html += `<div>DIF: ${dif.value.toFixed(4)}</div>`;
-                            if (dea) html += `<div>DEA: ${dea.value.toFixed(4)}</div>`;
-                        }
-                        
+                        let html = `<div style="border-bottom:1px solid #555;padding-bottom:3px;">${params[0].name}</div>`;
+                        params.forEach(p => {
+                            if (p.seriesName === 'KLine') {
+                                html += `O:${p.data[1]} H:${p.data[4]} L:${p.data[3]} C:${p.data[2]}<br/>`;
+                            } else if (p.value !== undefined) {
+                                html += `<span style="color:${p.color}">●</span> ${p.seriesName}: ${p.value}<br/>`;
+                            }
+                        });
                         return html;
                     }
                 },
-                
-                axisPointer: { link: { xAxisIndex: 'all' } },
-
-                grid: [
-                    { left: '60px', right: '30px', top: '5%', height: '55%' },   // K线
-                    { left: '60px', right: '30px', top: '63%', height: '10%' },  // Volume
-                    { left: '60px', right: '30px', top: '76%', height: '10%' },  // MACD
-                    { left: '60px', right: '30px', top: '89%', height: '8%' }    // RSI
-                ],
-
-                // --- 关键修改：时间刻度颜色变亮 ---
-                xAxis: [
-                    { 
-                        type: 'category', data: dates, gridIndex: 0, 
-                        axisLine: { lineStyle: { color: '#555' } }, 
-                        axisLabel: { show: false } // 主图不显示时间，太挤
-                    },
-                    { type: 'category', data: dates, gridIndex: 1, axisLine: { show: false }, axisLabel: { show: false } },
-                    { type: 'category', data: dates, gridIndex: 2, axisLine: { show: false }, axisLabel: { show: false } },
-                    { 
-                        type: 'category', data: dates, gridIndex: 3, 
-                        axisLine: { lineStyle: { color: '#555' } },
-                        axisLabel: { color: '#e0e0e0', fontSize: 11 } // 最底部时间轴，亮白色
-                    }
-                ],
-
-                yAxis: [
-                    { scale: true, gridIndex: 0, splitLine: { show: true, lineStyle: { color: '#333' } }, axisLine: { show: false }, axisLabel: { color: '#aaa' } },
-                    { scale: true, gridIndex: 1, splitLine: { show: false }, axisLabel: { show: false }, axisLine: { show: false } },
-                    { scale: true, gridIndex: 2, splitLine: { show: true, lineStyle: { color: '#333', type: 'dashed' } }, axisLabel: { color: '#777', fontSize: 10 } },
-                    { scale: true, gridIndex: 3, splitLine: { show: true, lineStyle: { color: '#333', type: 'dashed' } }, axisLabel: { color: '#777', fontSize: 10 }, min: 0, max: 100 }
-                ],
-
-                dataZoom: [
-                    { type: 'inside', xAxisIndex: [0, 1, 2, 3], start: 80, end: 100 },
-                    { type: 'slider', xAxisIndex: [0, 1, 2, 3], bottom: 0, height: 15, borderColor: '#333', fillerColor: 'rgba(255,255,255,0.1)', textStyle: {color: '#aaa'} }
-                ],
-
+                grid: [{ left: '50px', right: '30px', top: '5%', height: '70%' }, { left: '50px', right: '30px', top: '80%', height: '15%' }],
+                xAxis: [{ type: 'category', data: dates, gridIndex: 0 }, { type: 'category', data: dates, gridIndex: 1 }],
+                yAxis: [{ scale: true, gridIndex: 0 }, { scale: true, gridIndex: 1, splitLine: {show: false} }],
+                dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 90, end: 100 }, { type: 'slider', xAxisIndex: [0, 1], bottom: 10 }],
                 series: [
-                    // --- Grid 0 ---
                     {
-                        name: 'KLine', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: data.ohlc,
-                        itemStyle: { 
-                            color: '#20b2aa', color0: '#ff6347', 
-                            borderColor: '#20b2aa', borderColor0: '#ff6347' 
-                        },
+                        name: 'KLine', type: 'candlestick', data: ohlc,
+                        itemStyle: { color: '#20b2aa', color0: '#ff6347', borderColor: '#20b2aa', borderColor0: '#ff6347' },
                         markPoint: { data: markPoints }
                     },
-                    {
-                        name: 'MA60', type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: data.ma60,
-                        smooth: true, showSymbol: false, lineStyle: { color: '#f39c12', width: 2, opacity: 0.8 }
-                    },
-
-                    // --- Grid 1 ---
+                    { name: 'EMA7', type: 'line', data: ema7, showSymbol: false, lineStyle: { color: '#FFD700', width: 1 } },
+                    { name: 'EMA25', type: 'line', data: ema25, showSymbol: false, lineStyle: { color: '#9370DB', width: 1 } },
+                    { name: 'EMA99', type: 'line', data: ema99, showSymbol: false, lineStyle: { color: '#1E90FF', width: 2 } },
+                    { name: 'EMA255', type: 'line', data: ema255, showSymbol: false, lineStyle: { color: '#00FF00', width: 2 } },
                     {
                         name: 'Volume', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: data.volume,
-                        itemStyle: { color: (params) => volColors[params.dataIndex] }
-                    },
-
-                    // --- Grid 2 ---
-                    {
-                        name: 'MACD', type: 'bar', xAxisIndex: 2, yAxisIndex: 2, data: data.macd.bar,
-                        itemStyle: { color: (params) => params.value > 0 ? '#ff6347' : '#20b2aa' }
-                    },
-                    {
-                        name: 'DIF', type: 'line', xAxisIndex: 2, yAxisIndex: 2, data: data.macd.diff,
-                        showSymbol: false, lineStyle: { color: '#fff', width: 1 }
-                    },
-                    {
-                        name: 'DEA', type: 'line', xAxisIndex: 2, yAxisIndex: 2, data: data.macd.dea,
-                        showSymbol: false, lineStyle: { color: '#ffff00', width: 1 }
-                    },
-
-                    // --- Grid 3 ---
-                    {
-                        name: 'RSI', type: 'line', xAxisIndex: 3, yAxisIndex: 3, data: data.rsi,
-                        showSymbol: false, lineStyle: { color: '#d35400', width: 1.5 },
-                        markLine: {
-                            symbol: 'none',
-                            data: [
-                                { yAxis: 70, lineStyle: { color: '#ff6347', type: 'dashed' } },
-                                { yAxis: 30, lineStyle: { color: '#20b2aa', type: 'dashed' } }
-                            ],
-                            label: { show: false }
-                        }
+                        itemStyle: { color: (params) => ohlc[params.dataIndex][1] >= ohlc[params.dataIndex][0] ? '#20b2aa' : '#ff6347' }
                     }
                 ]
             };
-            
             myChart.setOption(option, true);
         }
     </script>

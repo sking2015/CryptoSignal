@@ -192,63 +192,96 @@ class ChanLunStrategy:
         # 注意：这里假设 df_main 已经按时间排序
         close_series = df_main['close']
         
-        # 计算四条均线的最新值 (iloc[-1])
-        ema7   = close_series.ewm(span=7, adjust=False).mean().iloc[-1]
-        ema25  = close_series.ewm(span=25, adjust=False).mean().iloc[-1]
-        ema99  = close_series.ewm(span=99, adjust=False).mean().iloc[-1]
-        ema255 = close_series.ewm(span=255, adjust=False).mean().iloc[-1]
+        # 1. 计算均线序7列 (注意这里需要全量序列来判断趋势，而不仅仅是最后一个值)
+        ema7_series   = close_series.ewm(span=7, adjust=False).mean()
+        ema25_series  = close_series.ewm(span=25, adjust=False).mean()
+        ema99_series  = close_series.ewm(span=99, adjust=False).mean()
+        ema255_series = close_series.ewm(span=255, adjust=False).mean()
         
-        current_price = close_series.iloc[-1]
-        
+
+        # 获取最新值
+        last_p   = close_series.iloc[-2]
+        curr_p     = close_series.iloc[-1]
+        e7_prev   = ema7_series.iloc[-2]
+        e7_curr    = ema7_series.iloc[-1]
+        e25_curr   = ema25_series.iloc[-1]
+        e99_curr   = ema99_series.iloc[-1]
+        e99_prev   = ema99_series.iloc[-2]  # 前一根K线的EMA99
+        e255_curr  = ema255_series.iloc[-1]        
+                
+    
+          
+            
         # 设定乖离阈值 (用户设定为 20%)
-        threshold = 0.005
+        is_ema99_rising = e99_curr > e99_prev 
+        
+        if is_ema99_rising:
+            # 趋势向上：容易买(1%)，难卖(5%)
+            buy_threshold = 0.005
+            sell_threshold = 0.1
+            trend_desc = "多头趋势"
+        else:
+            # 趋势向下：容易卖(1%)，难买(5%)
+            buy_threshold = 0.005
+            sell_threshold = 0.05
+            trend_desc = "空头趋势"        
+
+    
+        #先来看下右侧信号
+        if last_p < e7_prev and curr_p > e7_curr:
+            return {
+                "type": "EMA7_Break",
+                "action": "buy",
+                "price": curr_p,
+                "desc": f"[{trend_desc}] 短期价格反转趋势: 当前价格反超EMA7 {e7_curr}",
+                "stop_loss": curr_p * 1.05
+            }   
+
+        if last_p > e7_prev and curr_p < e7_curr:
+            return {
+                "type": "EMA7_Break",
+                "action": "sell",
+                "price": curr_p,
+                "desc": f"[{trend_desc}] 短期价格反转趋势: 当前价格跌破EMA7 {e7_curr}",
+                "stop_loss": curr_p * 1.05
+            }                
         
         # ========================================================
         # 🔴 卖出信号逻辑 (趋势向上 + 价格暴涨远离均线)
         # ========================================================
         
         # 1. 均线多头排列验证：短期(7, 25) 必须在 长期(99, 255) 之上
-        is_bull_trend = (ema7 > ema99 and ema7 > ema255) and \
-                        (ema25 > ema99 and ema25 > ema255)
+        is_bull_layout = (e7_curr > e99_curr and e7_curr > e255_curr) 
         
         # 2. 乖离率验证：价格比 EMA7 高出 20%
         # 公式：Price > EMA7 * (1 + 0.2)
-        is_overbought = current_price > (ema7 * (1 + threshold))
-
-        print("当前价格",current_price)
-        print("EM7倍离值",ema7 * (1 + threshold))
-        
-        if is_bull_trend and is_overbought:
-            stop_loss_price = current_price * 1.05 # 简单的百分比止损，或根据你的需求调整
+        # 乖离率判断：当前价 > EMA7 * (1 + sell_threshold)
+        if is_bull_layout and curr_p > (e7_curr * (1 + sell_threshold)):
             return {
-                "type": "EMA_Revert_S",   # 信号类型标记
-                "action": "sell", 
-                "price": current_price, 
-                "desc": f"乖离过大:价超EMA7 {float(threshold*100)}% (看跌)", 
-                "stop_loss": stop_loss_price
+                "type": "EMA_S",
+                "action": "sell",
+                "price": curr_p,
+                "desc": f"[{trend_desc}] 乖离卖出: 超过EMA7 {int(sell_threshold*100)}%",
+                "stop_loss": curr_p * 1.05
             }
 
+        
         # ========================================================
-        # 🟢 买入信号逻辑 (趋势向下 + 价格暴跌远离均线)
+        # 🟢 买入信号逻辑 (EMA_Revert_B)
         # ========================================================
+        # 条件：7和25均在99和255之下 (大趋势空头)
+        is_bear_layout = (e7_curr < e99_curr and e7_curr < e255_curr) 
         
-        # 1. 均线空头排列验证：短期(7, 25) 必须在 长期(99, 255) 之下
-        is_bear_trend = (ema7 < ema99 and ema7 < ema255) and \
-                        (ema25 < ema99 and ema25 < ema255)
-        
-        # 2. 乖离率验证：价格比 EMA7 低 20%
-        # 公式：Price < EMA7 * (1 - 0.2)
-        is_oversold = current_price < (ema7 * (1 - threshold))
-        
-        if is_bear_trend and is_oversold:
-            stop_loss_price = current_price * 0.95 # 简单的百分比止损
+        # 乖离率判断：当前价 < EMA7 * (1 - buy_threshold)
+        if is_bear_layout and curr_p < (e7_curr * (1 - buy_threshold)):
             return {
-                "type": "EMA_Revert_B",   # 信号类型标记
-                "action": "buy", 
-                "price": current_price, 
-                "desc": f"乖离过大:价低EMA7 {int(threshold*100)}% (看涨)", 
-                "stop_loss": stop_loss_price
+                "type": "EMA_B",
+                "action": "buy",
+                "price": curr_p,
+                "desc": f"[{trend_desc}] 乖离买入: 低于EMA7 {int(buy_threshold*100)}%",
+                "stop_loss": curr_p * 0.95
             }
+                
 
         # 无信号
         return None    
